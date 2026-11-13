@@ -1,39 +1,98 @@
 <!doctype html>
 <html lang="ko">
 <head>
-  <meta name="app-shell" content="workout-generic-shell-v1">
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f6f8f4">
-  <meta name="description" content="나의 운동, 변화, 그리고 다음 목표.">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#f6f8f4" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
   <title>운동기록01</title>
   <style>
-    body{margin:0;background:#f6f8f4;color:#24362b;font-family:system-ui,sans-serif}
-    .boot{padding:30px;font-size:20px;font-weight:700}
-    .boot small{display:block;font-size:13px;font-weight:400;color:#718176;margin-top:12px}
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #f6f8f4;
+      color: #24362b;
+      font-family: system-ui, -apple-system, "Noto Sans KR", sans-serif;
+      overflow: hidden;
+    }
+    #appFrame {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #f6f8f4;
+      z-index: 1;
+    }
+    #bootOverlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 24px;
+      background: #f6f8f4;
+      z-index: 10;
+      transition: opacity 0.2s ease;
+    }
+    #bootOverlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .boot-title {
+      font-size: 20px;
+      font-weight: 800;
+      color: #24362b;
+    }
+    .boot-sub {
+      font-size: 13px;
+      color: #718176;
+      text-align: center;
+      line-height: 1.6;
+    }
   </style>
+</head>
+<body>
+  <div id="bootOverlay">
+    <div class="boot-title">운동기록01</div>
+    <div class="boot-sub" id="bootStatus">나의 트레이닝 노트를 불러오는 중…</div>
+  </div>
+
+  <iframe id="appFrame" title="운동기록01"></iframe>
+
   <script>
     (() => {
       const GAS_URL = 'https://script.google.com/macros/s/AKfycbwPdMt8y24U1ScTMCSqTEX3EOnjSzGlOTN1ffndNBKKIzBps6t2lLLdadHP0wbfJUwn/exec';
       const CHANNEL = 'workout-sheets-v1';
-      const USER_ID = 'recoverist02';
-      const pending = new Map();
-      let source = null;
-      let resolveReady;
-      const ready = new Promise(resolve => { resolveReady = resolve; });
+      const appFrame = document.getElementById('appFrame');
+      const bootOverlay = document.getElementById('bootOverlay');
+      const bootStatus = document.getElementById('bootStatus');
 
-      window.addEventListener('message', event => {
+      let bridgeSource = null;
+      let resolveBridgeReady = null;
+      const pending = new Map();
+
+      const bridgeReady = new Promise((resolve) => {
+        resolveBridgeReady = resolve;
+      });
+
+      window.addEventListener('message', (event) => {
         let host = '';
         try { host = new URL(event.origin).hostname; } catch (_) { return; }
         if (!host.endsWith('-script.googleusercontent.com') || !event.data || event.data.channel !== CHANNEL) return;
         if (event.data.type === 'ready') {
-          if (!source) {
-            source = event.source;
-            resolveReady();
+          if (!bridgeSource) {
+            bridgeSource = event.source;
+            resolveBridgeReady();
           }
           return;
         }
-        if (event.source !== source) return;
+        if (event.source !== bridgeSource) return;
         const item = pending.get(event.data.id);
         if (!item) return;
         clearTimeout(item.timer);
@@ -41,22 +100,19 @@
         event.data.error ? item.reject(new Error(event.data.error)) : item.resolve(event.data.result);
       });
 
-      function mountBridgeFrame() {
-        const frame = document.createElement('iframe');
-        frame.title = '운동기록01 Google Sheets 연결';
-        frame.setAttribute('aria-hidden', 'true');
-        frame.tabIndex = -1;
-        frame.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;border:0';
-        frame.src = GAS_URL + '?bridge=1';
-        (document.body || document.documentElement).appendChild(frame);
-      }
-      if (document.body) mountBridgeFrame();
-      else window.addEventListener('DOMContentLoaded', mountBridgeFrame, { once: true });
+      // 숨김 브리지 iframe 연결
+      const bridgeFrame = document.createElement('iframe');
+      bridgeFrame.title = '운동기록01 시트 연결';
+      bridgeFrame.setAttribute('aria-hidden', 'true');
+      bridgeFrame.tabIndex = -1;
+      bridgeFrame.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;border:0';
+      bridgeFrame.src = GAS_URL + '?bridge=1';
+      document.body.appendChild(bridgeFrame);
 
-      async function callBridge(payload) {
+      window.__workoutBridgeCall = async (payload) => {
         let waitTimer;
         await Promise.race([
-          ready,
+          bridgeReady,
           new Promise((_, reject) => {
             waitTimer = setTimeout(() => reject(new Error('구글 시트 연결이 지연되고 있어. 앱스크립트 새 버전 배포를 확인해줘.')), 15000);
           })
@@ -66,75 +122,107 @@
           const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
           const timer = setTimeout(() => {
             pending.delete(id);
-            reject(new Error('시트 응답이 늦어지고 있어. 새로고침 후 다시 확인해줘.'));
+            reject(new Error('시트 응답 시간이 초과됐어. 새로고침 후 다시 확인해줘.'));
           }, 25000);
           pending.set(id, { resolve, reject, timer });
-          source.postMessage({ channel: CHANNEL, id: id, payload: payload }, '*');
+          bridgeSource.postMessage({ channel: CHANNEL, id: id, payload: payload }, '*');
         });
+      };
+
+      function injectBridgeIntoAppHtml(rawHtml) {
+        const closeTag = '<' + '/script>';
+        const shim =
+          '<script>\n' +
+          '(() => {\n' +
+          '  const USER_ID = "recoverist02";\n' +
+          '  function makeResponse(data, status) {\n' +
+          '    return {\n' +
+          '      ok: status >= 200 && status < 300,\n' +
+          '      status: status,\n' +
+          '      headers: {\n' +
+          '        get(k) {\n' +
+          '          const n = String(k || "").toLowerCase();\n' +
+          '          if (n === "x-workout-user") return USER_ID;\n' +
+          '          if (n === "content-type") return "application/json";\n' +
+          '          return null;\n' +
+          '        }\n' +
+          '      },\n' +
+          '      async json() { return JSON.parse(JSON.stringify(data)); },\n' +
+          '      async text() { return JSON.stringify(data); }\n' +
+          '    };\n' +
+          '  }\n' +
+          '  const origFetch = window.fetch.bind(window);\n' +
+          '  window.fetch = async (input, init = {}) => {\n' +
+          '    const raw = typeof input === "string" ? input : (input && input.url ? input.url : "");\n' +
+          '    let u;\n' +
+          '    try { u = new URL(raw, location.origin); } catch (_) { return origFetch(input, init); }\n' +
+          '    if (!u.pathname.endsWith("/api/state") && !u.pathname.endsWith("/api/record") && !u.pathname.endsWith("/api/sheets/migrate")) {\n' +
+          '      return origFetch(input, init);\n' +
+          '    }\n' +
+          '    const method = String(init.method || "GET").toUpperCase();\n' +
+          '    let body = {};\n' +
+          '    if (init.body) { try { body = JSON.parse(init.body); } catch (_) {} }\n' +
+          '    try {\n' +
+          '      let payload;\n' +
+          '      if (u.pathname.endsWith("/api/state")) {\n' +
+          '        if (method === "GET") {\n' +
+          '          const scope = u.searchParams.get("scope");\n' +
+          '          payload = { action: "read", scope: scope === "extra" ? "extra" : undefined };\n' +
+          '        } else {\n' +
+          '          payload = { action: "save", sheets: body.sheets, revision: body.revision };\n' +
+          '        }\n' +
+          '      } else if (u.pathname.endsWith("/api/record")) {\n' +
+          '        if (method === "PUT") payload = { action: "saveRecord", table: body.table, row: body.row, previous: body.previous ?? null, deferScore: true };\n' +
+          '        else if (method === "DELETE") payload = { action: "deleteRecord", table: body.table, id: body.id };\n' +
+          '        else if (body.action === "recordScore") payload = { action: "recordScore", table: body.table, id: body.id };\n' +
+          '        else payload = { action: "recordStatus", table: body.table, id: body.id };\n' +
+          '      } else {\n' +
+          '        payload = { action: "read" };\n' +
+          '      }\n' +
+          '      const res = await window.parent.__workoutBridgeCall(payload);\n' +
+          '      return makeResponse(res || { error: "빈 응답" }, res && res.ok !== false ? 200 : 400);\n' +
+          '    } catch (err) {\n' +
+          '      return makeResponse({ ok: false, error: err && err.message ? err.message : String(err) }, 500);\n' +
+          '    }\n' +
+          '  };\n' +
+          '})();\n' +
+          closeTag;
+
+        const swRe = new RegExp('<script>\\(\\(\\)=>\\{[\\s\\S]*?serviceWorker[\\s\\S]*?<' + '/script>', 'gi');
+        const cfRe = new RegExp('<script>\\(function\\(\\)\\{function c\\(\\)[\\s\\S]*?<' + '/script>', 'gi');
+
+        let cleaned = String(rawHtml || '')
+          .replace(swRe, '')
+          .replace(cfRe, '')
+          .replace('className:`brand`,href:`/`', 'className:`brand`,href:`./`');
+
+        if (/<head[^>]*>/i.test(cleaned)) {
+          return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
+        }
+        return shim + cleaned;
       }
 
-      const nativeFetch = window.fetch.bind(window);
-      window.fetch = async (input, init = {}) => {
-        const rawUrl = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-        let parsed;
-        try { parsed = new URL(rawUrl, location.origin); } catch (_) { return nativeFetch(input, init); }
-        if (!parsed.pathname.endsWith('/api/state') && !parsed.pathname.endsWith('/api/record') && !parsed.pathname.endsWith('/api/sheets/migrate')) {
-          return nativeFetch(input, init);
+      async function loadAppShell() {
+        const candidates = ['./app.html', './운동기록%20html%20소스.txt'];
+        for (const path of candidates) {
+          try {
+            const res = await fetch(path, { cache: 'no-cache' });
+            if (res.ok) {
+              const text = await res.text();
+              if (text.includes('workout-generic-shell-v1') || text.includes('운동기록01')) {
+                appFrame.onload = () => bootOverlay.classList.add('hidden');
+                appFrame.srcdoc = injectBridgeIntoAppHtml(text);
+                setTimeout(() => bootOverlay.classList.add('hidden'), 300);
+                return;
+              }
+            }
+          } catch (_) {}
         }
+        bootStatus.innerHTML = '깃허브 저장소에 <b>app.html</b> 파일이 아직 없습니다.<br>컴퓨터의 <b>운동기록 html 소스.txt</b> 파일 이름을 <b>app.html</b>로 바꿔서 같은 저장소에 업로드해 주세요.';
+      }
 
-        const method = String(init.method || 'GET').toUpperCase();
-        let body = {};
-        if (init.body) {
-          try { body = JSON.parse(init.body); } catch (_) {}
-        }
-
-        try {
-          let reqPayload;
-          if (parsed.pathname.endsWith('/api/state')) {
-            if (method === 'GET') {
-              const scope = parsed.searchParams.get('scope');
-              const isBootstrap = parsed.searchParams.get('bootstrap') === '1';
-              reqPayload = { action: 'read', scope: scope === 'extra' ? 'extra' : (isBootstrap ? 'journal' : undefined) };
-            } else {
-              reqPayload = { action: 'save', sheets: body.sheets, revision: body.revision };
-            }
-          } else if (parsed.pathname.endsWith('/api/record')) {
-            if (method === 'PUT') {
-              reqPayload = { action: 'saveRecord', table: body.table, row: body.row, previous: body.previous ?? null, deferScore: true };
-            } else if (method === 'DELETE') {
-              reqPayload = { action: 'deleteRecord', table: body.table, id: body.id };
-            } else if (body.action === 'recordScore') {
-              reqPayload = { action: 'recordScore', table: body.table, id: body.id };
-            } else {
-              reqPayload = { action: 'recordStatus', table: body.table, id: body.id };
-            }
-          } else {
-            reqPayload = { action: 'read' };
-          }
-
-          const result = await callBridge(reqPayload);
-          const ok = result && result.ok !== false;
-          return new Response(JSON.stringify(result || { error: '빈 응답' }), {
-            status: ok ? 200 : 400,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Workout-User': USER_ID
-            }
-          });
-        } catch (err) {
-          return new Response(JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }), {
-            status: 500,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Workout-User': USER_ID
-            }
-          });
-        }
-      };
+      loadAppShell();
     })();
   </script>
-  <script type="module">
-import * as _ from "https://esm.sh/react@19.1.0";
-import * as v from "https://esm.sh/react-dom@19.1.0/client";
-import * as M from "https://esm.sh/react@19.1.0/jsx-runtime";
-function y(e){let t=e[15];return t==null||t===``||!Number.isFinite(Number(t))?null:Number(t)}var b=e=>e.reduce((e,t)=>e+t,0);function x(e,t){let n=new Date((e-25569)*864e5),r=n.getUTCDate(),i=new Date(Date.UTC(n.getUTCFullYear(),n.getUTCMonth()+t,1)),a=new Date(Date.UTC(i.getUTCFullYear(),i.getUTCMonth()+1,0)).getUTCDate();return i.setUTCDate(Math.min(r,a)),Math.round(i.getTime()/864e5)+25569}function S(e,t){return[...new Set(e.map(e=>String(e[4])))].map(n=>{let r=e.filter(e=>e[4]===n).sort((e,t)=>Number(t[1])-Number(e[1])),i=r[0],a=i[2]===`유산소`,o=(e,t)=>{let n=r.filter(n=>Number(n[1])>=e&&Number(n[1])<=t).map(y).filter(e=>e!==null);return n.length?a?b(n):b(n)/n.length:null};return[i[2],i[3],n,null,t-Number(i[1]),a?i[13]:i[5],a?i[14]:b(i.slice(6,11).map(e=>Number(e||0))),o(t,1/0),o(t-7,t-1),o(x(t,-1),t-8),...Array.from({length:11},(e,n)=>o(x(t,-n-2),x(t,-n-1)-1))]}).sort((e,t)=>(e[0]===`유산소`)-+(t[0]===`유산소`)||Number(e[4])-Number(t[4]))}function C(e,t,n){if(Number(n[4])!==0)return``;let r=x(t,-1);return!e.some(e=>e[4]===n[2]&&y(e)!==null&&Number(e[1])>=r&&Number(e[1])<=t-8)||n[7]==null||n[9]==null?``:Number(n[7])>Number(n[9])?`status-up`:Number(n[7])<Number(n[9])?`status-down`:``}var w=T(`2026-10-19`),ee=[`등`,`가슴`,`어깨`,`팔`,`하체`,`복근`];function T(e){if(typeof e==`number`)return Number.isFinite(e)?Math.floor(e):NaN;let t=String(e||``).match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);return t?Math.round(Date.UTC(+t[1],t[2]-1,+t[3])/864e5)+25569:NaN}var te=e=>new Date((e-25569)*864e5).toISOString().slice(0,10),ne=e=>e-(new Date((e-25569)*864e5).getUTCDay()+6)%7,re=e=>e==null||e===``||!Number.isFinite(Number(e))?null:Number(e),E=e=>e.reduce((e,t)=>e+t,0),ie=e=>e.length?E(e)/e.length:null,ae=(e,t)=>e===null||t===null||t<=0?null:(e/t-1)*100,oe=e=>e.slice(6,11).filter(e=>(re(e)??0)>0).length,D=(e,t,n,r=1)=>T(e[r])>=t&&T(e[r])<=n;function se(e,t){let n=ne(t),r=(e.브리핑이력||[]).slice(1).map(e=>T(e[1])).filter(e=>Number.isFinite(e)&&e>=w&&e<n);return[...new Set([n,...r])].sort((e,t)=>t-e)}function O(e,t,n,r,i,a){let o=e.filter(e=>e[2]===`근력`&&(!a||e[3]===a)),s=o.filter(e=>D(e,t,n)),c=o.filter(e=>D(e,r,i)),l=0,u=0;for(let e of new Set(s.map(e=>e[4]))){let t=s.filter(t=>t[4]===e),n=c.filter(t=>t[4]===e);if(n.length<2)continue;let r=t.map(y).filter(e=>e!==null),i=n.map(y).filter(e=>e!==null),a=ae(ie(r),ie(i));if(a===null)continue;let o=Math.min(t.length,n.length);l+=a*o,u+=o}return u?l/u:null}function k(e,t,n){let r=Math.min(t+6,n),i=(e.운동기록||[]).slice(1).filter(e=>e[0]!=null&&e[0]!==``),a=(e.신체수치||[]).slice(1).filter(e=>T(e[1])<=r),o=i.filter(e=>D(e,t,r)),s=i.filter(e=>D(e,t-28,t-1)),c=e=>new Set(e.filter(e=>e[2]===`근력`).map(e=>T(e[1]))).size,l=e=>E(e.filter(e=>e[2]===`유산소`).map(e=>re(e[13])??0)),u=[...new Set([...ee,...o.filter(e=>e[2]===`근력`).map(e=>String(e[3]||`기타`)),...s.filter(e=>e[2]===`근력`).map(e=>String(e[3]||`기타`))])].map(e=>{let n=E(o.filter(t=>t[2]===`근력`&&String(t[3]||`기타`)===e).map(oe)),a=E(s.filter(t=>t[2]===`근력`&&String(t[3]||`기타`)===e).map(oe))/4;return{name:e,total:n,base:a,pct:ae(n,a),performance:O(i,t,r,t-28,t-1,e)}}),d=E(u.map(e=>e.total)),f=E(u.map(e=>e.base)),p=[];for(let e of new Set(o.filter(e=>e[2]===`근력`&&oe(e)>0).map(e=>String(e[4]||``)))){let n=t=>t.filter(t=>t[2]===`근력`&&t[4]===e&&oe(t)>0).map(e=>re(e[5])).filter(e=>e!==null&&e>0),r=n(i.filter(e=>T(e[1])<t)),a=n(o);e&&r.length&&a.length&&Math.max(...a)>Math.max(...r)&&p.push({name:e,old:Math.max(...r),now:Math.max(...a)})}let m=(e.건강데이터||[]).slice(1);function h(e,n){let i=(t,n)=>{let r=new Map;for(let i of m){let a=T(i[0]),o=re(i[e]);a>=t&&a<=n&&o!==null&&o>=0&&!r.has(a)&&r.set(a,o)}return[...r.entries()].sort((e,t)=>e[0]-t[0])},a=i(t,r),o=i(t-28,t-1),s=ie(a.map(e=>e[1])),c=ie(o.map(e=>e[1]));return{mean:s,base:c,pct:ae(s,c),days:a.length,ratio:a.length?a.filter(e=>e[1]>=n).length/a.length*100:null,low:a.filter(e=>c!==null&&c>0&&e[1]<=c*.7)}}let g=(e.목표||[]).slice(1).find(e=>T(e[2])<=r&&T(e[3])>=r),_=[[`체중`,5,4,`kg`],[`골격근량`,6,5,`kg`],[`체지방량`,7,6,`kg`],[`가슴둘레`,4,10,`cm`],[`허벅지둘레`,2,8,`cm`],[`이두둘레`,3,9,`cm`]].map(([e,t,n,i])=>{let o=a.filter(e=>re(e[t])!==null).sort((e,t)=>T(t[1])-T(e[1])),s=o[0],c=re(s?.[t]),l=re(g?.[n]),u=re((g?[...o].sort((e,t)=>Math.abs(T(e[1])-T(g[2]))-Math.abs(T(t[1])-T(g[2])))[0]:void 0)?.[t]),d=c!==null&&u!==null&&l!==null&&l!==u?Math.max(0,Math.min(100,(c-u)/(l-u)*100)):null,f=s?T(s[1]):r,p=(e,n=0)=>ie(o.filter(t=>T(t[1])>f-n-e&&T(t[1])<=f-n).map(e=>Number(e[t]))),m=p(28),h=p(28,28),_=p(84),v=p(84,84);return{name:e,unit:i,value:c,target:l,initial:u,pct:d,date:s?te(f):null,recent:m,prior:h,trend:_===null||v===null?`데이터 부족`:_>v+.15?`↑ 장기 상승`:_<v-.15?`↓ 장기 하락`:`→ 장기 유지`}}),v=[[`최근 4주`,t-28,t-1,4],[`이전 4주`,t-56,t-29,4],[`최근 12주`,t-84,t-1,12],[`최근 6개월`,t-182,t-1,26]].map(([e,t,n,r])=>{let a=i.filter(e=>D(e,t,n));return{name:e,strength:c(a)/r,cardio:l(a)/r,sets:E(a.filter(e=>e[2]===`근력`).map(oe))/r,performance:O(i,t,n,t-(n-t+1),t-1)}}),y=O(i,t,r,t-28,t-1),b=h(1,1e4),x=h(2,420),S=[],C=e=>`${e>0?`+`:``}${e.toFixed(1)}%`;y!==null&&Math.abs(y)>=15&&S.push(`전체 근력 수행 ${C(y)} (직전 4주 대비)`);let w=ae(d,f);t+6<n&&w!==null&&Math.abs(w)>=15&&S.push(`전체 세트수 ${C(w)} (직전 4주 주평균 대비)`);for(let e of u)e.performance!==null&&Math.abs(e.performance)>=15&&S.push(`${e.name} 수행 ${C(e.performance)}`),t+6<n&&e.pct!==null&&Math.abs(e.pct)>=15&&S.push(`${e.name} 세트수 ${C(e.pct)}`);return p.length&&S.push(`최고 중량 경신 ${p.length}종목 🏆`),b.pct!==null&&Math.abs(b.pct)>=15&&S.push(`일평균 걸음수 ${C(b.pct)}`),x.pct!==null&&Math.abs(x.pct)>=15&&S.push(`평균 수면 ${C(x.pct)}`),x.mean!==null&&x.mean<420&&S.push(`평균 수면 ${(x.mean/60).toFixed(1)}시간 · 목표 7시간 미달`),o.length||S.unshift(`이 주에는 아직 운동 기록이 없어.`),{start:t,end:r,ongoing:t===ne(n),strength:c(o),cardio:l(o),totalSets:d,baseSets:f,partStats:u,performance:y,prs:p.sort((e,t)=>e.name.localeCompare(t.name,`ko`)),steps:b,sleep:x,goal:g,body:_,history:v,feedback:S}}function ce(e,t){let n=(e.브리핑이력||[]).slice(1).find(e=>T(e[1])===t);if(!n)return null;try{let e=JSON.parse(String(n[14]));return e.start!==t||!Array.isArray(e.partStats)||!Array.isArray(e.body)||!Array.isArray(e.history)?null:{report:e,status:String(n[3]),updated:String(n[4])}}catch{return null}}var le=e=>e==null||e===``||!Number.isFinite(Number(e))?null:Number(e);function ue(e){let t=ne(e)+3,n=new Date((t-25569)*864e5).getUTCFullYear();return{year:n,week:Math.floor((t-T(`${n}-01-01`))/7)+1}}function de(e,t){let n=ne(t)-175,r=Array.from({length:26},(e,r)=>({start:n+r*7,end:Math.min(n+r*7+6,t),...ue(n+r*7),strengthOnly:0,cardioOnly:0,both:0,sets:0,strength:0,cardio:0,total:0})),i=new Map;for(let a of(e.운동기록||[]).slice(1)){let e=T(a[1]);if(a[0]==null||a[0]===``||!Number.isFinite(e)||e<n||e>t||![`근력`,`유산소`].includes(String(a[2])))continue;let o=r[Math.floor((e-n)/7)],s=i.get(e)||{strength:!1,cardio:!1};a[2]===`근력`?(s.strength=!0,o.sets+=a.slice(6,11).filter(e=>(le(e)??0)>0).length):s.cardio=!0,i.set(e,s)}for(let[e,t]of i){let i=r[Math.floor((e-n)/7)];t.strength&&i.strength++,t.cardio&&i.cardio++,i.total++,t.strength&&t.cardio?i.both++:t.strength?i.strengthOnly++:i.cardioOnly++}return r}var A=[[{name:`체중`,col:5,color:`#27364b`,axis:`left`,unit:`kg`},{name:`골격근량`,col:6,color:`#10b981`,axis:`right`,unit:`kg`},{name:`체지방량`,col:7,color:`#f59e0b`,axis:`right`,unit:`kg`}],[{name:`가슴둘레`,col:4,color:`#6366f1`,axis:`left`,unit:`cm`},{name:`허벅지둘레`,col:2,color:`#10b981`,axis:`right`,unit:`cm`},{name:`이두둘레`,col:3,color:`#ec4899`,axis:`right`,unit:`cm`}]];function j(e,t,n=-1/0){let r=new Map;for(let i of(e.신체수치||[]).slice(1)){let e=T(i[1]);if(i[0]==null||i[0]===``||!Number.isFinite(e)||e<n||e>t)continue;let a=r.get(e)||Array(8).fill(null);for(let e=2;e<=7;e++){let t=le(i[e]);t!==null&&(a[e]=t)}r.set(e,a)}return[...r].sort((e,t)=>e[0]-t[0]).map(([e,t])=>({date:e,values:t}))}function fe(e){if(!e.length)return{min:0,max:1,ticks:[0,.25,.5,.75,1]};let t=Math.min(...e),n=Math.max(...e),r=Math.max(n-t,.4),i=r*.08,a=(r+2*i)/4,o=10**Math.floor(Math.log10(a)),s=[1,2,2.5,5,10].map(e=>e*o).find(e=>e>=a),c=e=>Math.round(e*1e6)/1e6,l=c(Math.floor((t-i)/s)*s),u=c(Math.ceil((n+i)/s)*s);return{min:l,max:u,ticks:Array.from({length:Math.round((u-l)/s)+1},(e,t)=>c(l+t*s))}}function pe(e){if(!e.length)return[];let t=[...new Set(e.map(e=>te(e).slice(0,7)))];return[...new Set([0,Math.round((t.length-1)/3),Math.round((t.length-1)*2/3),t.length-1])].filter(e=>e>=0).map((n,r,i)=>{let a=e.flatMap((e,r)=>te(e).startsWith(t[n])?[r]:[]);return{index:r===0?0:r===i.length-1?e.length-1:a[Math.floor((a.length-1)/2)],label:t[n].slice(2).replace(`-`,`.`)}})}var he=e=>e===null?`—`:e.toLocaleString(`ko-KR`,{maximumFractionDigits:1}),ge=e=>te(e).slice(2).replaceAll(`-`,`.`),_e=[0,1,2,3,4];function N({x:e,width:t,label:n,onChoose:r}){return(0,M.jsx)(`rect`,{x:e,y:`23`,width:t,height:`190`,fill:`transparent`,role:`button`,tabIndex:0,"aria-label":n,onClick:r,onKeyDown:e=>{(e.key===`Enter`||e.key===` `)&&(e.preventDefault(),r())},style:{cursor:`pointer`}})}function ve({db:e,end:t,ongoing:n}){let r=(0,_.useMemo)(()=>de(e,t),[e,t]),[i,a]=(0,_.useState)(25),o=r[i],s=Math.max(120,Math.ceil(Math.max(...r.map(e=>e.sets))/20)*20),c=e=>40+(e+.5)*280/26,l=e=>190-e/7*162,u=e=>190-e/s*162;return(0,M.jsxs)(`section`,{className:`card briefing-section briefing-history-chart`,children:[(0,M.jsxs)(`div`,{className:`card-head`,children:[(0,M.jsx)(`h2`,{children:`📊 주차별 운동 일수 · 총 세트수`}),(0,M.jsx)(`span`,{className:`pill`,children:`근력 목표 주 4일`})]}),(0,M.jsxs)(`p`,{className:`briefing-inner-note`,children:[`최근 26주 · 운동 일수(왼쪽) / 근력 총 세트수(오른쪽)`,n?` · 이번 주 진행 중`:``]}),(0,M.jsxs)(`div`,{className:`history-chart-legend`,children:[(0,M.jsxs)(`span`,{children:[(0,M.jsx)(`i`,{style:{background:`#8b5cf6`}}),`둘 다 수행`]}),(0,M.jsxs)(`span`,{children:[(0,M.jsx)(`i`,{style:{background:`#10b981`}}),`근력만`]}),(0,M.jsxs)(`span`,{children:[(0,M.jsx)(`i`,{style:{background:`#0ea5e9`}}),`유산소만`]}),(0,M.jsxs)(`span`,{children:[(0,M.jsx)(`i`,{style:{background:`#334155`}}),`총 세트수`]}),(0,M.jsx)(`span`,{children:`┄ 근력 4일 목표`})]}),(0,M.jsxs)(`svg`,{viewBox:`0 0 360 232`,className:`history-chart-svg`,"aria-label":`주차별 운동 일수 누적 막대와 총 세트수 꺾은선 그래프`,children:[Array.from({length:8},(e,t)=>(0,M.jsxs)(`g`,{children:[(0,M.jsx)(`line`,{x1:`40`,x2:`320`,y1:l(t),y2:l(t),stroke:`#e5eae6`}),(0,M.jsx)(`text`,{x:`32`,y:l(t)+4,textAnchor:`end`,fontSize:`12`,fill:`#778779`,children:t})]},t)),_e.map(e=>(0,M.jsx)(`text`,{x:`327`,y:u(s*e/4)+4,fontSize:`12`,fill:`#778779`,children:he(s*e/4)},e)),(0,M.jsx)(`text`,{x:`27`,y:`16`,fontSize:`11`,fill:`#778779`,children:`일`}),(0,M.jsx)(`text`,{x:`321`,y:`16`,fontSize:`11`,fill:`#778779`,children:`세트`}),r.map((e,t)=>(0,M.jsxs)(`g`,{children:[[{n:e.both,color:`#8b5cf6`,base:0},{n:e.strengthOnly,color:`#10b981`,base:e.both},{n:e.cardioOnly,color:`#0ea5e9`,base:e.both+e.strengthOnly}].map(e=>(0,M.jsx)(`rect`,{x:c(t)-4,width:`8`,y:l(e.base+e.n),height:e.n/7*162,fill:e.color},e.color)),t%4==1||t===25?(0,M.jsxs)(`text`,{x:c(t),y:`211`,fontSize:`11`,textAnchor:`middle`,fill:`#778779`,children:[e.week,`주`]}):null]},e.start)),(0,M.jsx)(`line`,{x1:`40`,x2:`320`,y1:l(4),y2:l(4),stroke:`#e9a529`,strokeWidth:`1.8`,strokeDasharray:`4 4`}),(0,M.jsx)(`polyline`,{points:r.map((e,t)=>`${c(t)},${u(e.sets)}`).join(` `),fill:`none`,stroke:`#334155`,strokeWidth:`2`}),r.map((e,t)=>(0,M.jsx)(`circle`,{cx:c(t),cy:u(e.sets),r:t===i?3.8:2.1,fill:`#334155`},e.start)),(0,M.jsx)(`line`,{x1:c(i),x2:c(i),y1:`28`,y2:`190`,stroke:`#91a797`,strokeDasharray:`3 3`}),r.map((e,t)=>(0,M.jsx)(N,{x:c(t)-280/52,width:280/26,label:`${e.year}년 ${e.week}주 수치 보기`,onChoose:()=>a(t)},e.start))]}),(0,M.jsx)(`div`,{className:`history-chart-controls`,children:(0,M.jsxs)(`label`,{children:[`주차 선택`,(0,M.jsx)(`select`,{"aria-label":`운동 추이 주차 선택`,value:i,onChange:e=>a(Number(e.target.value)),children:r.map((e,t)=>(0,M.jsxs)(`option`,{value:t,children:[e.year,`년 `,e.week,`주 · `,ge(e.start),` ~ `,ge(e.end)]},e.start))})]})}),(0,M.jsxs)(`div`,{className:`history-chart-values`,"aria-live":`polite`,children:[(0,M.jsxs)(`span`,{children:[`근력 `,(0,M.jsxs)(`b`,{children:[o.strength,`일`]})]}),(0,M.jsxs)(`span`,{children:[`유산소 `,(0,M.jsxs)(`b`,{children:[o.cardio,`일`]})]}),(0,M.jsxs)(`span`,{children:[`둘 다 `,(0,M.jsxs)(`b`,{children:[o.both,`일`]})]}),(0,M.jsxs)(`span`,{children:[`운동 `,(0,M.jsxs)(`b`,{children:[o.total,`일`]})]}),(0,M.jsxs)(`span`,{children:[`총 `,(0,M.jsxs)(`b`,{children:[o.sets,`세트`]})]})]}),(0,M.jsx)(`p`,{className:`briefing-inner-note`,children:`같은 날 여러 종목은 1일로 세고, 둘 다 한 날은 보라색에 한 번만 포함해. 목표선은 근력만 + 둘 다의 합과 비교해.`})]})}function ye({db:e,end:t,targets:n}){let[r,i]=(0,_.useState)(0),[a,o]=(0,_.useState)(null),s=A[r],c=(0,_.useRef)(null),[l,u]=(0,_.useState)(360);(0,_.useEffect)(()=>{if(!c.current)return;let e=new ResizeObserver(e=>u(Math.max(240,e[0].contentRect.width)));return e.observe(c.current),()=>e.disconnect()},[]);let d=x(t,-12),f=(0,_.useMemo)(()=>j(e,t,d),[e,t,d]).filter(e=>s.some(t=>e.values[t.col]!==null)),p=a===null?f.length-1:Math.max(0,f.findIndex(e=>e.date===a)),m=f[p],h=s.map(e=>fe(f.flatMap(t=>t.values[e.col]===null?[]:[t.values[e.col]]))),g=l-76,v=e=>37+(e-d)/(t-d)*(g-37),y=e=>r===0?f.length<2?(37+g)/2:37+e/(f.length-1)*(g-37):v(f[e].date),b=(e,t)=>240-(e-h[t].min)/(h[t].max-h[t].min)*206,S=r===0?pe(f.map(e=>e.date)).map(e=>({...e,x:y(e.index)})):[0,4,8,12].map(e=>{let t=x(d,e);return{x:v(t),label:te(t).slice(2,7).replace(`-`,`.`)}});return(0,M.jsxs)(`section`,{className:`card briefing-section briefing-history-chart`,children:[(0,M.jsx)(`div`,{className:`card-head`,children:(0,M.jsx)(`h2`,{children:`⚖️ 신체수치 추이 · 인바디·둘레`})}),(0,M.jsxs)(`div`,{className:`history-chart-toggle`,role:`group`,"aria-label":`신체수치 그래프 종류`,children:[(0,M.jsx)(`button`,{"aria-pressed":r===0,className:r===0?`on`:``,onClick:()=>{i(0),o(null)},children:`체중·근육·지방`}),(0,M.jsx)(`button`,{"aria-pressed":r===1,className:r===1?`on`:``,onClick:()=>{i(1),o(null)},children:`가슴·허벅지·이두`})]}),(0,M.jsx)(`div`,{className:`history-chart-legend`,children:s.map((e,t)=>{let r=n.find(t=>t.name===e.name)?.target;return(0,M.jsxs)(`span`,{children:[(0,M.jsx)(`i`,{style:{background:e.color}}),e.name,`(`,[`좌`,`우·안쪽`,`우·바깥`][t],r==null?``:` · 목표 ${he(r)}`,`)`]},e.name)})}),(0,M.jsx)(`div`,{ref:c,children:f.length?(0,M.jsxs)(M.Fragment,{children:[(0,M.jsxs)(`svg`,{viewBox:`0 0 ${l} 318`,className:`history-chart-svg body-history-svg`,"aria-label":`최근 1년 ${s.map(e=>e.name).join(`, `)} 측정값 추이. 항목마다 독립된 자동 범위.`,children:[_e.map(e=>(0,M.jsx)(`line`,{x1:37,x2:g,y1:240-e/4*206,y2:240-e/4*206,stroke:`#e5eae6`},e)),s.map((e,t)=>{let n=t===0?37:t===1?g:g+37,i=t===0?30:n+6,a=h[t];return(0,M.jsxs)(`g`,{"aria-label":`${e.name} 세로축 ${he(a.min)} ~ ${he(a.max)}${e.unit}`,children:[(0,M.jsx)(`line`,{x1:n,x2:n,y1:34,y2:240,stroke:e.color,opacity:`.4`}),(0,M.jsx)(`text`,{x:t===0?33:n+2,y:`15`,textAnchor:t===0?`end`:`start`,fontSize:`11`,fill:e.color,children:r===0?[`체중`,`골격근`,`체지방`][t]:[`가슴`,`허벅지`,`이두`][t]}),(0,M.jsx)(`text`,{x:t===0?33:n+2,y:`29`,textAnchor:t===0?`end`:`start`,fontSize:`11`,fill:e.color,children:e.unit}),a.ticks.map(n=>(0,M.jsx)(`text`,{x:i,y:b(n,t)+4,textAnchor:t===0?`end`:`start`,fontSize:`11`,fill:e.color,children:he(n)},n))]},e.name)}),s.map((e,t)=>(0,M.jsxs)(`g`,{children:[f.slice(1).map((n,r)=>{let i=f[r].values[e.col],a=n.values[e.col];return i===null||a===null?null:(0,M.jsx)(`line`,{x1:y(r),x2:y(r+1),y1:b(i,t),y2:b(a,t),stroke:e.color,strokeWidth:`2.3`},n.date)}),f.map((n,r)=>{let i=n.values[e.col];return i===null?null:(0,M.jsx)(`circle`,{cx:y(r),cy:b(i,t),r:p===r?3.8:2.5,fill:`white`,stroke:e.color,strokeWidth:`2`},n.date)})]},e.name)),S.map(e=>(0,M.jsxs)(`g`,{children:[(0,M.jsx)(`line`,{x1:e.x,x2:e.x,y1:240,y2:246,stroke:`#778779`}),(0,M.jsx)(`text`,{x:e.x,y:268,textAnchor:`middle`,transform:`rotate(-25 ${e.x} 268)`,fontSize:`12`,fill:`#778779`,children:e.label})]},e.label)),r===0&&(0,M.jsx)(`text`,{x:(37+g)/2,y:304,textAnchor:`middle`,fontSize:`11`,fill:`#778779`,children:`측정 순서 · 동일 간격`}),(0,M.jsx)(`line`,{x1:y(p),x2:y(p),y1:34,y2:240,stroke:`#91a797`,strokeDasharray:`3 3`}),f.map((e,t)=>{let n=t===0?37:(y(t-1)+y(t))/2;return(0,M.jsx)(`rect`,{x:n,y:34,width:(t===f.length-1?g:(y(t)+y(t+1))/2)-n,height:206,fill:`transparent`,role:`button`,tabIndex:0,"aria-label":`${te(e.date)} 신체수치 보기`,onClick:()=>o(e.date),onKeyDown:t=>{(t.key===`Enter`||t.key===` `)&&(t.preventDefault(),o(e.date))}},e.date)})]}),(0,M.jsx)(`div`,{className:`history-chart-controls`,children:(0,M.jsxs)(`label`,{children:[`측정일`,(0,M.jsx)(`select`,{"aria-label":`신체수치 측정일 선택`,value:m.date,onChange:e=>o(Number(e.target.value)),children:f.map(e=>(0,M.jsx)(`option`,{value:e.date,children:te(e.date).replaceAll(`-`,`.`)},e.date))})]})}),(0,M.jsx)(`div`,{className:`history-chart-values`,"aria-live":`polite`,children:s.map(e=>(0,M.jsxs)(`span`,{children:[e.name,` `,(0,M.jsxs)(`b`,{children:[he(m.values[e.col]),e.unit]})]},e.name))})]}):(0,M.jsx)(`p`,{className:`briefing-inner-note`,children:`최근 1년간 해당 신체수치 기록이 없어.`})}),(0,M.jsxs)(`p`,{className:`briefing-inner-note`,children:[`최근 1년 · `,ge(d),` ~ `,ge(t),`. 항목별 최솟값·최댓값에 맞춰 축 범위를 자동 조절해. `,r===0?`측정점은 날짜 간격과 관계없이 동일 간격이야. `:``,`각 선은 해당 색의 눈금으로 읽어줘.`]})]})}var P=[{name:`하체`,color:`#10b981`},{name:`등`,color:`#3b82f6`},{name:`가슴`,color:`#6366f1`},{name:`팔`,color:`#f59e0b`},{name:`복근`,color:`#ec4899`},{name:`어깨`,color:`#795548`}];function be(e,t){let n=(e.운동기록||[]).slice(1).filter(e=>e[0]!=null&&e[0]!==``&&e[2]===`근력`),r=[...Array.from({length:6},(e,n)=>{let r=6-n;return{label:`${r}M`,start:x(t,-r),end:r===1?t-7:x(t,1-r)-1}}),{label:`7D`,start:t-6,end:t}],i=r.map(e=>P.map(t=>{let r=new Map;for(let i of n){let n=T(i[1]),a=y(i),o=String(i[4]??``).trim();if(i[3]!==t.name||!o||!(n>=e.start&&n<=e.end)||a===null)continue;let s=r.get(o)||[];s.push(a),r.set(o,s)}return new Map([...r].sort(([e],[t])=>e.localeCompare(t)).map(([e,t])=>[e,{name:e,count:t.length,value:t.reduce((e,t)=>e+t,0)/t.length}]))})),a=r.map((e,t)=>({...e,parts:P.map((e,n)=>{let r=[...i[t][n].values()].map(e=>({...e,comparisonValue:null}));return{...e,value:null,score:r.length?r.reduce((e,t)=>e+t.value,0):null,count:r.reduce((e,t)=>e+t.count,0),exercises:r,comparisonLabel:null,change:null,matchedCount:0,comparisonTotal:null,currentTotal:null,baselineLabel:null}})}));return P.forEach((e,t)=>{let n=a.findIndex(e=>(e.parts[t].score??0)>0);if(n<0)return;a[n].parts[t].value=100;for(let e of a)e.parts[t].baselineLabel=r[n].label;let o=(e,n)=>{let o=a[e].parts[t],s=i[e][t];for(let e of n){let n=a[e].parts[t];if(n.value===null)continue;let c=[...s.values()].filter(n=>i[e][t].has(n.name));if(!c.length)continue;let l=c.reduce((e,t)=>e+t.value,0),u=c.reduce((n,r)=>n+i[e][t].get(r.name).value,0);if(u<=0||l<0)continue;let d=l/u,f=n.value*d;if(Number.isFinite(f)){o.value=f,o.change=(d-1)*100,o.matchedCount=c.length,o.comparisonLabel=r[e].label,o.currentTotal=l,o.comparisonTotal=u,o.exercises=o.exercises.map(n=>({...n,comparisonValue:i[e][t].get(n.name)?.value??null}));return}}};for(let e=n-1;e>=0;e--)o(e,Array.from({length:n-e},(t,n)=>e+n+1));for(let e=n+1;e<a.length;e++)o(e,Array.from({length:e},(t,n)=>e-n-1))}),a}var xe=e=>e===null?`—`:e.toLocaleString(`ko-KR`,{maximumFractionDigits:1}),F=e=>e===null?`비교 부족`:`${e>0?`+`:``}${xe(e)}%`,Se=[void 0,`7 3`,`2 3`,`10 3 2 3`,`5 2 1 2`,`12 4`];function I({db:e,end:t,ongoing:n}){let r=(0,_.useMemo)(()=>be(e,t),[e,t]),[i,a]=(0,_.useState)(6),[o,s]=(0,_.useState)(null),c=r.flatMap(e=>e.parts.flatMap((e,t)=>e.value===null||o!==null&&o!==t?[]:[e.value])),l=Math.min(100,...c),u=Math.max(100,...c),d=Math.max(20,u-l),f=d/4,p=10**Math.floor(Math.log10(f)),m=Math.ceil(f/p)*p,h=Math.max(0,Math.floor((l-d*.05)/m)*m),g=Math.ceil((u+d*.05)/m)*m,v=Array.from({length:Math.round((g-h)/m)+1},(e,t)=>h+t*m),y=e=>38+e*48,b=e=>190-(e-h)/(g-h)*162,x=r[i],S=r[6].parts.filter(e=>e.change!==null),C=S.filter(e=>e.change>0).length;return(0,M.jsxs)(`section`,{className:`card briefing-section part-score-trend`,children:[(0,M.jsxs)(`div`,{className:`card-head`,children:[(0,M.jsx)(`h2`,{children:`📈 부위별 수행능력 성장 추세`}),(0,M.jsx)(`span`,{className:`pill`,children:S.length?`${S.length}부위 중 ${C}부위 상승`:`비교 데이터 부족`})]}),(0,M.jsxs)(`p`,{className:`briefing-inner-note`,children:[`6개월 전 → `,n?`현재`:`선택 주`,` · 성장지수 · 6M = 100`]}),(0,M.jsx)(`p`,{className:`briefing-inner-note`,children:`100보다 5 높으면 기준 대비 +5%. 6M 기록이 없으면 최초 비교 가능 구간이 기준이야. 부위 버튼을 누르면 해당 선만 보여.`}),(0,M.jsxs)(`div`,{className:`part-trend-legend`,children:[(0,M.jsx)(`button`,{type:`button`,"aria-pressed":o===null,onClick:()=>s(null),children:`전체`}),P.map((e,t)=>(0,M.jsxs)(`button`,{type:`button`,"aria-pressed":o===t,onClick:()=>s(o===t?null:t),children:[(0,M.jsx)(`i`,{style:{background:e.color}}),e.name]},e.name))]}),c.length?(0,M.jsx)(M.Fragment,{children:(0,M.jsxs)(`svg`,{className:`part-trend-chart`,viewBox:`0 0 360 224`,role:`img`,"aria-label":`부위별 성장지수. 6M을 100으로 놓고 같은 종목의 점수 합계 변화를 연결해 계산해.`,children:[v.map(e=>(0,M.jsxs)(`g`,{children:[(0,M.jsx)(`line`,{x1:`38`,x2:`326`,y1:b(e),y2:b(e),stroke:e===100?`#9aaa9d`:`#e2e8e3`,strokeDasharray:e===100?`4 3`:void 0}),(0,M.jsx)(`text`,{x:`31`,y:b(e)+4,textAnchor:`end`,fill:`#778779`,fontSize:`12`,children:xe(e)})]},e)),r.map((e,t)=>(0,M.jsx)(`line`,{x1:y(t),x2:y(t),y1:`28`,y2:`190`,stroke:i===t?`#a4b6a8`:`#eef1ee`,strokeDasharray:i===t?`4 3`:void 0},e.label)),[...P.map((e,t)=>t).filter(e=>e!==o),...o===null?[]:[o]].map(e=>{let t=P[e];return(0,M.jsxs)(`g`,{opacity:+(o===null||o===e),children:[r.slice(1).map((n,i)=>{let a=r[i].parts[e].value,s=n.parts[e].value;return a===null||s===null?null:(0,M.jsx)(`line`,{x1:y(i),x2:y(i+1),y1:b(a),y2:b(s),stroke:t.color,strokeWidth:o===e?3.5:2.5,strokeDasharray:Se[e]},i)}),r.map((n,r)=>{let a=n.parts[e].value;return a===null?null:(0,M.jsx)(`circle`,{cx:y(r),cy:b(a),r:i===r?4.5:3,fill:t.color,stroke:`white`,strokeWidth:`1`,children:(0,M.jsxs)(`title`,{children:[n.label,` `,t.name,`: 지수 `,xe(a)]})},r)})]},t.name)}),r.map((e,t)=>(0,M.js
+</body>
+</html>
