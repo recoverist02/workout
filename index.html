@@ -100,7 +100,6 @@
         event.data.error ? item.reject(new Error(event.data.error)) : item.resolve(event.data.result);
       });
 
-      // 숨김 브리지 iframe 연결
       const bridgeFrame = document.createElement('iframe');
       bridgeFrame.title = '운동기록01 시트 연결';
       bridgeFrame.setAttribute('aria-hidden', 'true');
@@ -155,7 +154,7 @@
           '  window.fetch = async (input, init = {}) => {\n' +
           '    const raw = typeof input === "string" ? input : (input && input.url ? input.url : "");\n' +
           '    let u;\n' +
-          '    try { u = new URL(raw, location.origin); } catch (_) { return origFetch(input, init); }\n' +
+          '    try { u = new URL(raw, "https://recoverist02.github.io"); } catch (_) { return origFetch(input, init); }\n' +
           '    if (!u.pathname.endsWith("/api/state") && !u.pathname.endsWith("/api/record") && !u.pathname.endsWith("/api/sheets/migrate")) {\n' +
           '      return origFetch(input, init);\n' +
           '    }\n' +
@@ -194,7 +193,8 @@
         let cleaned = String(rawHtml || '')
           .replace(swRe, '')
           .replace(cfRe, '')
-          .replace('className:`brand`,href:`/`', 'className:`brand`,href:`./`');
+          .replace('className:`brand`,href:`/`', 'className:`brand`,href:`./`')
+          .replace(/location\.reload\(\)/g, 'window.top.location.reload()');
 
         if (/<head[^>]*>/i.test(cleaned)) {
           return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
