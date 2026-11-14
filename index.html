@@ -38,7 +38,7 @@
       padding: 24px;
       background: #f6f8f4;
       z-index: 10;
-      transition: opacity 0.2s ease;
+      transition: opacity 0.15s ease;
     }
     #bootOverlay.hidden {
       opacity: 0;
@@ -60,18 +60,24 @@
 <body>
   <div id="bootOverlay">
     <div class="boot-title">운동기록01</div>
-    <div class="boot-sub" id="bootStatus">나의 트레이닝 노트를 불러오는 중…</div>
+    <div class="boot-sub" id="bootStatus">클라우드에서 초고속으로 불러오는 중…</div>
   </div>
 
   <iframe id="appFrame" title="운동기록01"></iframe>
 
   <script>
     (() => {
+      // ⚠️ 아래 따옴표 안에 1단계에서 복사한 Firebase Realtime Database 주소를 넣어주세요!
+      const FIREBASE_DB_URL = 'https://recoverist-hub-default-rtdb.asia-southeast1.firebasedatabase.app/';
+
       const GAS_URL = 'https://script.google.com/macros/s/AKfycbwPdMt8y24U1ScTMCSqTEX3EOnjSzGlOTN1ffndNBKKIzBps6t2lLLdadHP0wbfJUwn/exec';
       const CHANNEL = 'workout-sheets-v1';
       const appFrame = document.getElementById('appFrame');
       const bootOverlay = document.getElementById('bootOverlay');
       const bootStatus = document.getElementById('bootStatus');
+
+      const cleanFbUrl = String(FIREBASE_DB_URL || '').trim().replace(/\/+$/, '');
+      const hasFirebase = cleanFbUrl.startsWith('https://') && !cleanFbUrl.includes('여기에_');
 
       let bridgeSource = null;
       let resolveBridgeReady = null;
@@ -128,6 +134,74 @@
         });
       };
 
+      // Firebase 클라우드 읽기/쓰기 헬퍼
+      async function readCloud(key) {
+        if (!hasFirebase) return null;
+        try {
+          const res = await fetch(`${cleanFbUrl}/workout/${key}.json`, { cache: 'no-store' });
+          if (!res.ok) return null;
+          return await res.json();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      async function writeCloud(key, data) {
+        if (!hasFirebase || !data || data.ok === false) return;
+        try {
+          await fetch(`${cleanFbUrl}/workout/${key}.json`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+        } catch (_) {}
+      }
+
+      // 구글 시트 원본과 클라우드 DB 백그라운드 동기화
+      async function syncSheetToCloud(scope) {
+        const key = scope === 'extra' ? 'state_extra' : 'state_main';
+        try {
+          const fresh = await window.__workoutBridgeCall({ action: 'read', scope: scope === 'extra' ? 'extra' : undefined });
+          if (fresh && fresh.ok !== false) {
+            await writeCloud(key, fresh);
+          }
+          return fresh;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      // 하이브리드(클라우드 초고속 읽기 + 구글 시트 원본 저장) 라우터
+      window.__workoutHybridCall = async (payload) => {
+        if (payload && payload.action === 'read') {
+          const key = payload.scope === 'extra' ? 'state_extra' : 'state_main';
+          const cloudData = await readCloud(key);
+          if (cloudData && cloudData.ok !== false) {
+            // 클라우드 데이터를 0.1초 만에 즉시 반환하고, 뒤에서 조용히 시트 원본과 동기화
+            syncSheetToCloud(payload.scope);
+            return cloudData;
+          }
+          // 최초 1회(클라우드가 비어있을 때) 시트에서 읽어와 클라우드에 채움
+          const sheetData = await window.__workoutBridgeCall(payload);
+          if (sheetData && sheetData.ok !== false) {
+            writeCloud(key, sheetData);
+          }
+          return sheetData;
+        }
+
+        // 기록 저장·수정·삭제 시: 구글 시트에 원본 기록 후 클라우드 최신화
+        const res = await window.__workoutBridgeCall(payload);
+        if (res && res.ok !== false) {
+          if (payload.action === 'save' && res.sheets) {
+            writeCloud('state_main', res);
+          } else {
+            syncSheetToCloud();
+            syncSheetToCloud('extra');
+          }
+        }
+        return res;
+      };
+
       function injectBridgeIntoAppHtml(rawHtml) {
         const closeTag = '<' + '/script>';
         const shim =
@@ -178,7 +252,7 @@
           '      } else {\n' +
           '        payload = { action: "read" };\n' +
           '      }\n' +
-          '      const res = await window.parent.__workoutBridgeCall(payload);\n' +
+          '      const res = await window.parent.__workoutHybridCall(payload);\n' +
           '      return makeResponse(res || { error: "빈 응답" }, res && res.ok !== false ? 200 : 400);\n' +
           '    } catch (err) {\n' +
           '      return makeResponse({ ok: false, error: err && err.message ? err.message : String(err) }, 500);\n' +
@@ -206,19 +280,19 @@
         const candidates = ['./app.html', './운동기록%20html%20소스.txt'];
         for (const path of candidates) {
           try {
-            const res = await fetch(path, { cache: 'no-cache' });
+            const res = await fetch(path);
             if (res.ok) {
               const text = await res.text();
               if (text.includes('workout-generic-shell-v1') || text.includes('운동기록01')) {
                 appFrame.onload = () => bootOverlay.classList.add('hidden');
                 appFrame.srcdoc = injectBridgeIntoAppHtml(text);
-                setTimeout(() => bootOverlay.classList.add('hidden'), 300);
+                setTimeout(() => bootOverlay.classList.add('hidden'), 200);
                 return;
               }
             }
           } catch (_) {}
         }
-        bootStatus.innerHTML = '깃허브 저장소에 <b>app.html</b> 파일이 아직 없습니다.<br>컴퓨터의 <b>운동기록 html 소스.txt</b> 파일 이름을 <b>app.html</b>로 바꿔서 같은 저장소에 업로드해 주세요.';
+        bootStatus.innerHTML = '깃허브 저장소에 <b>app.html</b> 파일이 아직 없습니다.';
       }
 
       loadAppShell();
