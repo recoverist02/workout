@@ -1,0 +1,7 @@
+{
+  "workout_primary_v1": {
+    ".read": "auth != null && auth.token.email === 'SET_OWNER_EMAIL' && auth.token.email_verified === true",
+    ".write": "auth != null && auth.token.email === 'SET_OWNER_EMAIL' && auth.token.email_verified === true",
+    ".validate": "newData.hasChildren(['schema', 'revision', 'sheetsJSON', 'auxJSON', 'backup']) && newData.child('schema').val() === 1 && newData.child('revision').isNumber() && newData.child('sheetsJSON').isString() && newData.child('auxJSON').isString() && (!data.exists() || newData.child('revision').val() >= data.child('revision').val())"
+  }
+}

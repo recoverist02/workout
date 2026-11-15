@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "ownerEmail": "SET_OWNER_EMAIL",
+  "databaseURL": "https://YOUR_DATABASE.firebasedatabase.app",
+  "firebase": null
+}
