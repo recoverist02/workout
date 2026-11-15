@@ -20,9 +20,9 @@
     }
     #appFrame {
       position: fixed;
-      inset: 26px 0 0;
+      inset: 0;
       width: 100%;
-      height: calc(100% - 26px);
+      height: 100%;
       border: 0;
       background: #f6f8f4;
       z-index: 1;
@@ -60,231 +60,310 @@
 <body>
   <div id="bootOverlay">
     <div class="boot-title">운동기록01</div>
-    <div class="boot-sub" id="bootStatus">Firebase 연결을 준비 중…</div>
-    <button id="loginButton" hidden style="padding:14px 22px;border:0;border-radius:12px;background:#39765f;color:white;font-size:16px">Google로 로그인</button>
+    <div class="boot-sub" id="bootStatus">클라우드에서 초고속으로 불러오는 중…</div>
   </div>
 
-  <div id="cloudStatus" role="status" style="position:fixed;top:0;width:100%;height:26px;z-index:5;text-align:center;font-size:12px;padding:4px;background:#e7f1e7">Firebase 연결 확인 중</div>
   <iframe id="appFrame" title="운동기록01"></iframe>
 
   <script>
-/* Shared by the browser and Apps Script. No credentials or personal records. */
-var WorkoutCloudCore = (() => {
-  const widths = {'운동기록':16,'신체수치':9,'운동리스트':4,'목표':12,'운동계획':6,'식단계획':5};
-  const names = Object.keys(widths);
-  const width = name => name === '운동기록' ? 15 : widths[name];
-  const canonical = (row, n) => row == null ? null : JSON.stringify(Array.from({length:n}, (_,i) => row[i] == null || row[i] === '' ? null : row[i]));
-  const equal = (name,a,b) => canonical(a,width(name)) === canonical(b,width(name));
-  const rows = table => new Map(table.slice(1).filter(r=>r[0]!=null && r[0]!=='').map(r=>[String(r[0]),r]));
-  function fail(message,code='INVALID'){const e=new Error(message);e.code=code;throw e;}
-  function validate(tables, original=tables) {
-    for(const name of names){
-      const table=tables?.[name];
-      if(!Array.isArray(table)||!table.length||table.length>10000||canonical(table[0],widths[name])!==canonical(original?.[name]?.[0],widths[name]))fail(name+': 열 구성을 확인해줘.');
-      const ids=new Set();
-      for(const row of table.slice(1)){
-        if(!Array.isArray(row)||row.length>widths[name]||row.some(v=>v!=null && typeof v!=='string' && !(typeof v==='number'&&Number.isFinite(v))))fail(name+': 잘못된 기록 형식');
-        if(row[0]==null||row[0]==='')continue;
-        const id=String(row[0]);if(ids.has(id)||id.length>128)fail(name+': 중복 또는 잘못된 ID');ids.add(id);
-        if(['운동기록','신체수치'].includes(name)&&(!Number.isFinite(Number(row[1]))||Number(row[1])<1))fail('날짜를 확인해줘.');
-      }
-    }
-    return tables;
-  }
-  function score(row){
-    if(row[2]==='유산소')return row[13]==null||row[13]===''?null:row[13];
-    const total=row.slice(6,11).reduce((sum,v)=>sum+(typeof v==='number'?v:0),0);
-    if(row[5]==null||row[5]===''||!total)return null;
-    const value=Number(row[5])*total*Math.log(Number(row[5])/5+1)/100;
-    if(!Number.isFinite(value))fail('무게를 확인해줘.');return value;
-  }
-  function clean(tables){
-    validate(tables);
-    const result={};
-    for(const name of names)result[name]=[tables[name][0],...rows(tables[name]).values()].map((r,i)=>{
-      const row=JSON.parse(canonical(r,widths[name]));
-      if(i&&name==='운동기록')row[15]=score(row);return row;
-    });
-    return result;
-  }
-  function signature(tables){return JSON.stringify(names.map(name=>[canonical(tables[name][0],widths[name]),...[...rows(tables[name])].sort(([a],[b])=>a<b?-1:a>b?1:0).map(([,row])=>canonical(row,width(name)))]));}
-  function merge(base,local,remote){
-    validate(local,base);validate(remote,base);const result={};const conflicts=[];
-    for(const name of names){
-      const b=rows(base[name]),l=rows(local[name]),r=rows(remote[name]);const output=[];
-      for(const id of new Set([...r.keys(),...l.keys(),...b.keys()])){
-        let row;
-        if(equal(name,l.get(id),b.get(id)))row=r.get(id);
-        else if(equal(name,r.get(id),b.get(id))||equal(name,l.get(id),r.get(id)))row=l.get(id);
-        else {conflicts.push(name+' / '+id);continue;}
-        if(row)output.push(row);
-      }
-      result[name]=[remote[name][0],...output];
-    }
-    if(conflicts.length)fail('양쪽에서 바뀐 기록이 있어. 덮어쓰지 않았어: '+conflicts.slice(0,8).join(', '),'CONFLICT');
-    return clean(result);
-  }
-  function apply(state,request,baseline){
-    if(state?.schema!==1||!Number.isSafeInteger(state.revision))fail('클라우드 초기화를 확인해줘.');
-    const tables=JSON.parse(state.sheetsJSON);validate(tables);
-    let result={};const name=request.table;
-    if(request.action==='save'){
-      if(String(state.revision)!==String(request.revision))fail('다른 곳에서 기록이 바뀌었어. 새로고침해줘.','CONFLICT');
-      validate(request.sheets,tables);for(const key of names)tables[key]=request.sheets[key];
-    }else{
-      if(!names.includes(name))fail('지원하지 않는 기록 종류야.');
-      const map=rows(tables[name]),id=String(request.row?.[0]??request.id??'');
-      if(!id||id.length>128)fail('기록 ID를 확인해줘.');
-      const current=map.get(id)||null;
-      if(request.action==='saveRecord'){
-        if(!Array.isArray(request.row)||request.previous!==null&&(!Array.isArray(request.previous)||String(request.previous[0])!==id))fail('이전 기록을 확인해줘.');
-        if(!equal(name,current,request.row)&&!equal(name,current,request.previous))fail('이 기록이 다른 곳에서 변경됐어. 입력값은 보관했어.','CONFLICT');
-        map.set(id,request.row);result={table:name,id,row:request.row};
-      }else if(request.action==='deleteRecord'){
-        if(!['운동기록','신체수치'].includes(name))fail('삭제할 기록을 확인해줘.');
-        if(current && (!baseline||!equal(name,current,rows(baseline[name]).get(id))))fail('삭제 전에 기록이 변경됐어. 새로고침해줘.','CONFLICT');
-        map.delete(id);result={table:name,id,exists:false,deleted:true};
-      }else fail('지원하지 않는 요청이야.');
-      tables[name]=[tables[name][0],...map.values()];
-    }
-    const next=clean(tables),changed=signature(next)!==signature(JSON.parse(state.sheetsJSON));
-    if(result.row)result.row=rows(next[name]).get(result.id);
-    return {state:changed?{...state,sheetsJSON:JSON.stringify(next),revision:state.revision+1,updatedAt:Date.now()}:state,result,changed};
-  }
-  return {names,widths,width,canonical,equal,rows,validate,score,clean,signature,merge,apply,fail};
-})();
-if(typeof module!=='undefined')module.exports=WorkoutCloudCore;
+    (() => {
+      const FIREBASE_DB_URL = 'https://recoverist-hub-default-rtdb.asia-southeast1.firebasedatabase.app';
+      const GAS_URL = 'https://script.google.com/macros/s/AKfycbwPdMt8y24U1ScTMCSqTEX3EOnjSzGlOTN1ffndNBKKIzBps6t2lLLdadHP0wbfJUwn/exec';
+      const CHANNEL = 'workout-sheets-v1';
 
-/* Firebase-only request transport. No Apps Script or Sheets calls. */
-function createWorkoutPrimary({fetcher,token,url,notify=()=>{}}){
-  let queue=Promise.resolve(),latest=null,serial=0;
-  const emit=e=>notify({...e,serial:++serial});
-  const enqueue=fn=>{const task=queue.then(fn);queue=task.catch(()=>{});return task;};
-  async function request(init={}){
-    const idToken=await token(),controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),15000);
-    try{
-      // Firebase ID tokens use auth=; never log this URL or persist the token.
-      const res=await fetcher(url+'?auth='+encodeURIComponent(idToken),{...init,cache:'no-store',signal:controller.signal,headers:{'X-Firebase-ETag':'true',...init.headers}});
-      if(res.status===412)return null;
-      if(!res.ok)throw Error('Firebase 연결을 확인해줘. ('+res.status+')');
-      const state=await res.json(),etag=res.headers.get('etag');
-      if(state?.schema!==1||!etag)throw Error('Firebase 원본 초기화가 필요해.');
-      WorkoutCloudCore.validate(JSON.parse(state.sheetsJSON));return {state,etag};
-    }finally{clearTimeout(timer);}
-  }
-  function response(snapshot){
-    const s=snapshot.state;
-    return {ok:true,source:'firebase',bridgeReady:true,initialized:true,protocol:2,partial:false,
-      revision:String(s.revision),sheets:{...JSON.parse(s.auxJSON||'{}'),...JSON.parse(s.sheetsJSON)},
-      backup:{revision:s.backup.revision,pending:s.revision>s.backup.revision,status:s.backup.status,completedAt:s.backup.completedAt,message:s.backup.message||''}};
-  }
-  function accept(snapshot){latest=snapshot;const data=response(snapshot);emit({type:'verified',scope:'state_main',data});return data;}
-  async function work(payload){
-    const started=performance.now();
-    if(payload.action==='read')return accept(await request());
-    if(['recordScore','recordStatus'].includes(payload.action)){
-      const snapshot=await request(),sheets=JSON.parse(snapshot.state.sheetsJSON);
-      if(!WorkoutCloudCore.names.includes(payload.table))throw Error('기록 종류를 확인해줘.');
-      const row=WorkoutCloudCore.rows(sheets[payload.table]).get(String(payload.id))||null;
-      return {ok:true,source:'firebase',protocol:2,table:payload.table,id:payload.id,row,exists:!!row};
-    }
-    if(!latest)throw Error('Firebase에서 최신 기록을 먼저 불러와줘.');
-    const baseline=JSON.parse(latest.state.sheetsJSON);
-    emit({type:'mutation'});
-    let snapshot=latest;
-    for(let attempt=0;attempt<5;attempt++){
-      const change=WorkoutCloudCore.apply(snapshot.state,payload,baseline);
-      // Even an apparent no-op must pass CAS: the cached row may have changed
-      // elsewhere since it was displayed. Never confirm deletion from cache.
-      let saved;
-      try{saved=await request({method:'PUT',headers:{'Content-Type':'application/json','if-match':snapshot.etag},body:JSON.stringify(change.state)});}
-      catch(error){
-        // A timeout can occur after Firebase committed. Read back before
-        // reporting failure; never overwrite by blindly retrying old bytes.
-        const check=await request().catch(()=>null);
-        if(check&&WorkoutCloudCore.signature(JSON.parse(check.state.sheetsJSON))===WorkoutCloudCore.signature(JSON.parse(change.state.sheetsJSON)))saved=check;
-        else throw error;
-      }
-      if(saved){const data=accept(saved);return {...data,...change.result,timing:{totalMs:performance.now()-started},scorePending:false};}
-      snapshot=await request();
-    }
-    throw Error('다른 기기에서 기록을 저장 중이야. 입력값은 유지돼. 다시 시도해줘.');
-  }
-  return {call:payload=>enqueue(()=>work(payload)).catch(error=>{emit({type:'error',message:error.message});throw error;})};
-}
-if(typeof module!=='undefined')module.exports=createWorkoutPrimary;
+      const appFrame = document.getElementById('appFrame');
+      const bootOverlay = document.getElementById('bootOverlay');
+      const bootStatus = document.getElementById('bootStatus');
+      const cleanFbUrl = FIREBASE_DB_URL.replace(/\/+$/, '');
 
-  </script>
-  <script type="module">
-const WORKOUT_PUBLIC_CONFIG={"apiKey":"AIzaSyBgMPZGCQcUW-nRQ2mC14GaN7VxeAXxlak","authDomain":"recoverist-hub.firebaseapp.com","databaseURL":"https://recoverist-hub-default-rtdb.asia-southeast1.firebasedatabase.app","projectId":"recoverist-hub","appId":"1:936252174350:web:e5daf7a9c58d12b4ae4c5f"};
-import {initializeApp} from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
-import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signOut} from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js';
+      // 1. 페이지 시작 즉시 클라우드 데이터와 app.html을 병렬로 프리패치
+      let cachedMain = null;
+      let cachedExtra = null;
+      let latestWriteSeq = 0;
 
-window.workoutAuthReady=(async()=>{
-  const config=WORKOUT_PUBLIC_CONFIG;
-  const auth=getAuth(initializeApp(config));
-  const button=document.getElementById('loginButton'),status=document.getElementById('bootStatus');
-  return new Promise((resolve,reject)=>{
-    button.onclick=async()=>{
-      button.disabled=true;
-      try{await signInWithPopup(auth,new GoogleAuthProvider());}
-      catch(e){status.textContent='로그인을 완료하지 못했어. 팝업 허용 후 다시 눌러줘.';button.disabled=false;}
-    };
-    onAuthStateChanged(auth,async user=>{
-      if(!user){status.textContent='내 기록을 열려면 Google 계정으로 로그인해줘.';button.hidden=false;button.disabled=false;return;}
-      try {
-        const token=await user.getIdToken();
-        const response=await fetch(config.databaseURL+'/workout_primary_v1/schema.json?auth='+encodeURIComponent(token),{cache:'no-store',signal:AbortSignal.timeout(10000)});
-        if(response.status===401||response.status===403){await signOut(auth);status.textContent='운동기록 소유자 계정으로 로그인해줘.';return;}
-        if(!response.ok||await response.json()!==1)throw Error('Firebase 원본 상태를 확인해줘.');
-      } catch(error) {status.textContent='Firebase 연결을 확인한 뒤 새로고침해줘.';button.hidden=true;return;}
-      button.hidden=true;
-      resolve({url:config.databaseURL+'/workout_primary_v1.json',token:async()=>{
-        if(auth.currentUser?.uid!==user.uid)throw Error('다시 로그인해줘.');
-        return auth.currentUser.getIdToken();
-      }});
-    },reject);
-  });
-})();
-window.workoutAuthReady.catch(e=>{document.getElementById('bootStatus').textContent=e.message;});
+      const prefetchMainPromise = fetch(`${cleanFbUrl}/workout/state_main.json`, { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => {
+          if (d && d.ok !== false && d.sheets) cachedMain = d;
+          return cachedMain;
+        })
+        .catch(() => null);
 
-    (async () => {
+      const prefetchExtraPromise = fetch(`${cleanFbUrl}/workout/state_extra.json`, { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => {
+          if (d && d.ok !== false && d.sheets) cachedExtra = d;
+          return cachedExtra;
+        })
+        .catch(() => null);
 
-const appFrame=document.getElementById('appFrame'),bootOverlay=document.getElementById('bootOverlay'),bootStatus=document.getElementById('bootStatus');
-const syncListeners=new Set();let lastEvent=null,cacheVersion=null;
-window.__workoutSubscribe=fn=>{syncListeners.add(fn);if(lastEvent)fn(lastEvent);return()=>syncListeners.delete(fn);};
-window.__workoutGetCacheVersion=()=>cacheVersion;
-function notifyWorkout(event){
- if(event.type==='verified'){
-   lastEvent=event;cacheVersion={revision:event.data.revision,generation:Number(event.data.revision)};
-   const b=event.data.backup;
-   document.getElementById('cloudStatus').textContent=b.status==='sheet-edited'?'Firebase 저장 · 시트 수정 내용 확인 필요':b.status==='error'?'Firebase 저장 · 시트 백업 재시도 중':b.pending?'Firebase 저장 · 시트 백업 대기':'Firebase 연결 · 시트 백업 완료';
- }else if(event.type==='error'){lastEvent=event;document.getElementById('cloudStatus').textContent='연결 확인 필요 · 입력값은 보관돼';}
- else if(event.type==='mutation')lastEvent=null;
- for(const fn of syncListeners)try{fn(event)}catch(_){}
-}
-const auth=await window.workoutAuthReady;
-const workoutSync=createWorkoutPrimary({fetcher:(...args)=>fetch(...args),...auth,notify:notifyWorkout});
-window.__workoutHybridCall=payload=>workoutSync.call(payload);
-setInterval(()=>{if(document.visibilityState==='visible')workoutSync.call({action:'read'}).catch(()=>{});},30000);
-window.addEventListener('online',()=>workoutSync.call({action:'read'}).catch(()=>{}));
-      function injectBridgeIntoAppHtml(rawHtml) {
-        const patches=[["function pt({initialState","function prepareWorkoutDraft(storage,cacheKey,key,row,original,current){\n  const storageKey='workout-pending-v1:'+cacheKey;\n  let pending=null;try{pending=JSON.parse(storage.getItem(storageKey)||'null')}catch{}\n  const matching=pending?.key===key && pending?.row?.[0]===row[0];\n  const width=key==='운동기록'?15:9;\n  const cells=a=>Array.from({length:width},(_,i)=>a[i]==null||a[i]===''?null:a[i]);\n  const equal=(a,b)=>a==null||b==null?a==null&&b==null:JSON.stringify(cells(a))===JSON.stringify(cells(b));\n  const previous=matching && equal(original,pending.row) && Object.prototype.hasOwnProperty.call(pending,'previous')?pending.previous:(original||null);\n  if(current && equal(current,row)){storage.removeItem(storageKey);return 'saved';}\n  storage.setItem(storageKey,JSON.stringify({key,row,edit:!!original,previous}));\n  return equal(previous,current||null)?'ready':'conflict';\n}\nfunction pt({initialState"],["},[t,n,i,a,o]),(0,_.useEffect)(()=>{if(E&&ce&&!N)try{","},[t,n,i,a,o]);const cloudSeen=(0,_.useRef)(0);\n(0,_.useEffect)(()=>{\n  if(!t || !window.__workoutSubscribe)return;\n  return window.__workoutSubscribe(event=>{\n    if(!['preview','verified','error'].includes(event.type))return;\n    if(event.serial<=cloudSeen.current || g.current || N)return;\n    cloudSeen.current=event.serial;\n    if(event.type==='preview'){\n      let cached=null;try{cached=JSON.parse(localStorage.getItem('workout-cache-v2:'+t)||'null')}catch{}\n      const same=cached?.revision===event.data.revision;\n      const newer=Number(event.data._cacheGeneration||0)>Number(cached?._cacheGeneration||0) && Number(cached?._cacheGeneration||0)>0;\n      if(cached && !same && !newer)return;\n      ie(event.data.sheets);oe(event.data.revision);se(event.data.source||'firebase');\n      y(event.data.protocol||1);x(!event.data.partial);\n    }else if(event.type==='verified'){\n      const data=event.data;\n      ie(previous=>{\n        if(!previous)return data.sheets;\n        const next={...previous};\n        for(const [key,rows] of Object.entries(data.sheets)){\n          if(event.scope==='state_extra' && ['운동기록','신체수치','운동리스트','목표','운동계획','식단계획'].includes(key))continue;\n          if(JSON.stringify(previous[key])!==JSON.stringify(rows))next[key]=rows;\n        }\n        return next;\n      });\n      if(event.scope!=='state_extra'){oe(data.revision);se(data.source||'firebase');de(!!data.bridgeReady);y(data.protocol||1);le(true);x(!data.partial);}\n      else x(true);\n    }else if(event.type==='error'){le(false);P(event.message);}\n  });\n},[t,N]);\n(0,_.useEffect)(()=>{if(E&&ce&&!N)try{"],["let e={key:i,row:a,edit:!!I};try{localStorage.setItem(`workout-pending-v1:`+t,JSON.stringify(e))}catch{","try{const draftState=prepareWorkoutDraft(localStorage,t,i,a,I,E[i].find(e=>e[0]===a[0]));if(draftState==='saved'){zt();return}if(draftState==='conflict'){P('입력값은 보관했어. 이 기록이 다른 곳에서 변경됐어. 창을 닫고 최신 기록을 확인해줘.');return}}catch{"],["JSON.stringify({sheets:E,revision:ae,source:D})","JSON.stringify({sheets:E,revision:ae,source:D,_cacheGeneration:window.__workoutCacheVersion?.revision===ae?window.__workoutCacheVersion.generation:0})"],["return vt.then(e=>{if(e.status===401)","return (window.__workoutSessionReady||vt).then(e=>{if(e.status===401)"]];
-        for(const [before,after] of patches){
-          if(!rawHtml.includes(before))throw new Error('앱 버전이 달라 안전하게 연결할 수 없어.');
-          rawHtml=rawHtml.replace(before,after);
+      const prefetchShellPromise = fetch('./app.html')
+        .then(r => (r.ok ? r.text() : null))
+        .catch(() => null);
+
+      // 2. 구글 시트 백업용 숨김 브리지 연결
+      let bridgeSource = null;
+      let resolveBridgeReady = null;
+      const pending = new Map();
+      const bridgeReady = new Promise(resolve => { resolveBridgeReady = resolve; });
+
+      window.addEventListener('message', (event) => {
+        let host = '';
+        try { host = new URL(event.origin).hostname; } catch (_) { return; }
+        if (!host.endsWith('-script.googleusercontent.com') || !event.data || event.data.channel !== CHANNEL) return;
+        if (event.data.type === 'ready') {
+          if (!bridgeSource) {
+            bridgeSource = event.source;
+            resolveBridgeReady();
+          }
+          return;
         }
-        rawHtml=rawHtml.replaceAll('`sheets`','`firebase`').replaceAll('workout-cache-v2:','workout-cache-v2:');
-        for(const [before,after] of [["구글 시트에 저장했어","Firebase에 저장했어"],["구글 시트 연결됨","Firebase 연결됨"],["웹앱용 구글 시트에 연결됨","Firebase 원본 · 구글 시트 자동 백업"],["입력·수정·삭제가 웹앱 테스트용 구글 시트에 반영돼. 기존 원본 AppSheet와 원본보존 백업에는 영향을 주지 않아. 시트에서 직접 수정한 기록은 새로고침하면 가져와.","입력·수정·삭제는 Firebase에 저장돼. 시트에는 서버가 약 1분 간격으로 백업해. 시트를 직접 수정했으면 ☁️ 클라우드 동기화 메뉴로 반영해줘. 백업 중에는 시트 직접 편집을 피해줘."],["시트에서 새로 불러오기","Firebase에서 새로 불러오기"],[" 원본 앱과 독립적으로 저장돼"," 시트 백업은 백그라운드에서 진행돼"],["최근 10회, 현재 접속에서만 보관해. 시트 연결에는 외부 네트워크·Apps Script·시트 처리가 함께 포함돼. 인증·시트 연결은 서버 시간에 포함되므로 더하지 않아.","최근 10회, 현재 접속에서만 보관해. 전체 시간은 Firebase 통신을 포함해. 시트 백업 시간은 포함하지 않아."]]){if(!rawHtml.includes(before))throw Error('화면 버전 불일치');rawHtml=rawHtml.split(before).join(after);}
+        if (event.source !== bridgeSource) return;
+        const item = pending.get(event.data.id);
+        if (!item) return;
+        clearTimeout(item.timer);
+        pending.delete(event.data.id);
+        event.data.error ? item.reject(new Error(event.data.error)) : item.resolve(event.data.result);
+      });
+
+      const bridgeFrame = document.createElement('iframe');
+      bridgeFrame.title = '운동기록01 시트 백업 연결';
+      bridgeFrame.setAttribute('aria-hidden', 'true');
+      bridgeFrame.tabIndex = -1;
+      bridgeFrame.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;border:0';
+      bridgeFrame.src = GAS_URL + '?bridge=1';
+      document.body.appendChild(bridgeFrame);
+
+      window.__workoutBridgeCall = async (payload) => {
+        let waitTimer;
+        await Promise.race([
+          bridgeReady,
+          new Promise((_, reject) => {
+            waitTimer = setTimeout(() => reject(new Error('시트 백업 연결 지연')), 15000);
+          })
+        ]).finally(() => clearTimeout(waitTimer));
+
+        return new Promise((resolve, reject) => {
+          const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error('시트 백업 응답 시간 초과'));
+          }, 25000);
+          pending.set(id, { resolve, reject, timer });
+          bridgeSource.postMessage({ channel: CHANNEL, id, payload }, '*');
+        });
+      };
+
+      // 3. 수행점수 즉시 계산 함수 (시트 수식과 100% 동일)
+      function calcWorkoutScore(row) {
+        if (!Array.isArray(row)) return null;
+        if (row[2] === '유산소') {
+          return row[13] == null || row[13] === '' ? null : Number(row[13]);
+        }
+        const totalReps = row.slice(6, 11).reduce((sum, v) => sum + (Number(v) > 0 ? Number(v) : 0), 0);
+        const weight = Number(row[5]);
+        if (!Number.isFinite(weight) || weight <= 0 || totalReps <= 0) return null;
+        const val = (weight * totalReps * Math.log(weight / 5 + 1)) / 100;
+        return Number.isFinite(val) ? Math.round(val) : null;
+      }
+
+      async function writeCloud(key, data) {
+        if (!data || data.ok === false) return;
+        try {
+          await fetch(`${cleanFbUrl}/workout/${key}.json`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+        } catch (_) {}
+      }
+
+      // 백그라운드 시트 백업 (클라우드 저장 완료 후 비동기 실행)
+      function backupToSheetInBackground(payload, seq) {
+        window.__workoutBridgeCall(payload)
+          .then(res => {
+            if (seq !== latestWriteSeq || !res || res.ok === false) return;
+            // 시트에서 계산된 정밀 점수가 있으면 조용히 클라우드에 반영
+            if (payload.action === 'saveRecord' && res.row && cachedMain?.sheets?.[payload.table]) {
+              const rows = cachedMain.sheets[payload.table];
+              const idx = rows.findIndex((r, i) => i > 0 && String(r[0]) === String(res.row[0]));
+              if (idx > 0) {
+                rows[idx] = res.row;
+                writeCloud('state_main', cachedMain);
+              }
+            }
+          })
+          .catch(() => {});
+      }
+
+      // 4. 클라우드 메인 + 시트 백업 하이브리드 라우터
+      window.__workoutHybridCall = async (payload) => {
+        const started = performance.now();
+
+        // [조회] 클라우드에서 0.1초 만에 즉시 반환
+        if (payload && payload.action === 'read') {
+          const isExtra = payload.scope === 'extra';
+          if (isExtra) {
+            const extra = cachedExtra || (await prefetchExtraPromise);
+            if (extra && extra.sheets) {
+              return { ...extra, source: 'sheets', bridgeReady: true, protocol: 2, timing: { totalMs: performance.now() - started } };
+            }
+            if (cachedMain && cachedMain.sheets) {
+              return { ok: true, source: 'sheets', sheets: cachedMain.sheets, revision: cachedMain.revision || '1', initialized: true, protocol: 2, timing: { totalMs: performance.now() - started } };
+            }
+          } else {
+            const main = cachedMain || (await prefetchMainPromise);
+            const extra = cachedExtra || (await prefetchExtraPromise);
+            if (main && main.sheets) {
+              const mergedSheets = extra && extra.sheets ? { ...extra.sheets, ...main.sheets } : main.sheets;
+              cachedMain = {
+                ...main,
+                ok: true,
+                source: 'sheets',
+                bridgeReady: true,
+                initialized: true,
+                protocol: 2,
+                partial: false,
+                sheets: mergedSheets
+              };
+              return { ...cachedMain, timing: { totalMs: performance.now() - started } };
+            }
+          }
+
+          // 클라우드가 완전히 비어있는 최초 1회에만 시트에서 읽어와 클라우드 초기화
+          const sheetData = await window.__workoutBridgeCall(payload);
+          if (sheetData && sheetData.ok !== false) {
+            if (isExtra) {
+              cachedExtra = sheetData;
+              await writeCloud('state_extra', sheetData);
+            } else {
+              cachedMain = sheetData;
+              await writeCloud('state_main', sheetData);
+            }
+          }
+          return sheetData;
+        }
+
+        // [단건 기록 저장·수정] 클라우드 즉시 저장 후 시트는 백그라운드 백업
+        if (payload && payload.action === 'saveRecord') {
+          const main = cachedMain || (await prefetchMainPromise);
+          if (!main || !main.sheets) throw new Error('클라우드 데이터를 먼저 불러와줘.');
+          const table = payload.table;
+          const row = [...payload.row];
+          if (table === '운동기록') {
+            row[15] = calcWorkoutScore(row);
+          }
+          const rows = [...(main.sheets[table] || [])];
+          const idx = rows.findIndex((r, i) => i > 0 && String(r[0]) === String(row[0]));
+          if (idx > 0) rows[idx] = row;
+          else rows.push(row);
+
+          const nextRev = String(Date.now());
+          cachedMain = {
+            ...main,
+            revision: nextRev,
+            updatedAt: Date.now(),
+            sheets: { ...main.sheets, [table]: rows }
+          };
+
+          const mySeq = ++latestWriteSeq;
+          await writeCloud('state_main', cachedMain);
+          backupToSheetInBackground({ ...payload, row, deferScore: false }, mySeq);
+
+          return {
+            ok: true,
+            source: 'sheets',
+            protocol: 2,
+            table,
+            id: String(row[0]),
+            row,
+            revision: nextRev,
+            scorePending: false,
+            timing: { totalMs: performance.now() - started }
+          };
+        }
+
+        // [단건 기록 삭제] 클라우드 즉시 삭제 후 시트는 백그라운드 백업
+        if (payload && payload.action === 'deleteRecord') {
+          const main = cachedMain || (await prefetchMainPromise);
+          if (!main || !main.sheets) throw new Error('클라우드 데이터를 먼저 불러와줘.');
+          const table = payload.table;
+          const id = String(payload.id);
+          const rows = (main.sheets[table] || []).filter((r, i) => i === 0 || String(r[0]) !== id);
+
+          const nextRev = String(Date.now());
+          cachedMain = {
+            ...main,
+            revision: nextRev,
+            updatedAt: Date.now(),
+            sheets: { ...main.sheets, [table]: rows }
+          };
+
+          const mySeq = ++latestWriteSeq;
+          await writeCloud('state_main', cachedMain);
+          backupToSheetInBackground(payload, mySeq);
+
+          return {
+            ok: true,
+            source: 'sheets',
+            protocol: 2,
+            table,
+            id,
+            exists: false,
+            deleted: true,
+            revision: nextRev,
+            timing: { totalMs: performance.now() - started }
+          };
+        }
+
+        // [점수/상태 확인] 클라우드 메모리에서 즉시 응답
+        if (payload && (payload.action === 'recordScore' || payload.action === 'recordStatus')) {
+          const main = cachedMain || (await prefetchMainPromise);
+          const rows = main?.sheets?.[payload.table] || [];
+          const found = rows.find((r, i) => i > 0 && String(r[0]) === String(payload.id)) || null;
+          return {
+            ok: true,
+            source: 'sheets',
+            protocol: 2,
+            table: payload.table,
+            id: payload.id,
+            row: found,
+            exists: !!found,
+            timing: { totalMs: performance.now() - started }
+          };
+        }
+
+        // [전체 테이블 저장] 클라우드 즉시 저장 후 시트 백그라운드 백업
+        if (payload && payload.action === 'save') {
+          const main = cachedMain || (await prefetchMainPromise);
+          const nextRev = String(Date.now());
+          cachedMain = {
+            ...(main || {}),
+            ok: true,
+            source: 'sheets',
+            bridgeReady: true,
+            initialized: true,
+            protocol: 2,
+            partial: false,
+            revision: nextRev,
+            updatedAt: Date.now(),
+            sheets: { ...(main?.sheets || {}), ...payload.sheets }
+          };
+          const mySeq = ++latestWriteSeq;
+          await writeCloud('state_main', cachedMain);
+          backupToSheetInBackground(payload, mySeq);
+          return { ...cachedMain, timing: { totalMs: performance.now() - started } };
+        }
+
+        return window.__workoutBridgeCall(payload);
+      };
+
+      function injectBridgeIntoAppHtml(rawHtml) {
         const closeTag = '<' + '/script>';
         const shim =
           '<script>\n' +
           '(() => {\n' +
           '  const USER_ID = "recoverist02";\n' +
-          '  window.__workoutSessionReady=Promise.resolve({ok:true,status:200,headers:{get:()=>USER_ID}});\n' +
-          '  window.__workoutSubscribe=listener=>window.parent.__workoutSubscribe(listener);\n' +
-          '  Object.defineProperty(window,"__workoutCacheVersion",{get:()=>window.parent.__workoutGetCacheVersion()});\n' +
           '  function makeResponse(data, status) {\n' +
           '    return {\n' +
           '      ok: status >= 200 && status < 300,\n' +
@@ -322,7 +401,7 @@ window.addEventListener('online',()=>workoutSync.call({action:'read'}).catch(()=
           '          payload = { action: "save", sheets: body.sheets, revision: body.revision };\n' +
           '        }\n' +
           '      } else if (u.pathname.endsWith("/api/record")) {\n' +
-          '        if (method === "PUT") payload = { action: "saveRecord", table: body.table, row: body.row, previous: body.previous ?? null, deferScore: true };\n' +
+          '        if (method === "PUT") payload = { action: "saveRecord", table: body.table, row: body.row, previous: body.previous ?? null, deferScore: false };\n' +
           '        else if (method === "DELETE") payload = { action: "deleteRecord", table: body.table, id: body.id };\n' +
           '        else if (body.action === "recordScore") payload = { action: "recordScore", table: body.table, id: body.id };\n' +
           '        else payload = { action: "recordStatus", table: body.table, id: body.id };\n' +
@@ -345,7 +424,9 @@ window.addEventListener('online',()=>workoutSync.call({action:'read'}).catch(()=
           .replace(swRe, '')
           .replace(cfRe, '')
           .replace('className:`brand`,href:`/`', 'className:`brand`,href:`./`')
-          .replace(/location\.reload\(\)/g, 'window.top.location.reload()');
+          .replace(/location\.reload\(\)/g, 'window.top.location.reload()')
+          .replaceAll('구글 시트에 저장했어', '클라우드에 저장했어 (시트 자동 백업)')
+          .replaceAll('구글 시트 연결됨', '클라우드 연결됨 · 시트 자동 백업');
 
         if (/<head[^>]*>/i.test(cleaned)) {
           return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
@@ -353,28 +434,20 @@ window.addEventListener('online',()=>workoutSync.call({action:'read'}).catch(()=
         return shim + cleaned;
       }
 
-      async function loadAppShell() {
-        const candidates = ['./app.html', './운동기록%20html%20소스.txt'];
-        for (const path of candidates) {
-          try {
-            const res = await fetch(path);
-            if (res.ok) {
-              const text = await res.text();
-              if (text.includes('workout-generic-shell-v1') || text.includes('운동기록01')) {
-                appFrame.onload = () => bootOverlay.classList.add('hidden');
-                appFrame.srcdoc = injectBridgeIntoAppHtml(text);
-                setTimeout(() => bootOverlay.classList.add('hidden'), 200);
-                return;
-              }
-            }
-          } catch (_) {}
+      async function boot() {
+        const text = await prefetchShellPromise;
+        if (text && (text.includes('workout-generic-shell-v1') || text.includes('운동기록01'))) {
+          await prefetchMainPromise;
+          appFrame.onload = () => bootOverlay.classList.add('hidden');
+          appFrame.srcdoc = injectBridgeIntoAppHtml(text);
+          setTimeout(() => bootOverlay.classList.add('hidden'), 150);
+          return;
         }
-        bootStatus.innerHTML = '깃허브 저장소에 <b>app.html</b> 파일이 아직 없습니다.';
+        bootStatus.innerHTML = '깃허브 저장소에 <b>app.html</b> 파일을 확인해 주세요.';
       }
 
-      loadAppShell();
-    })().catch(error=>{document.getElementById("bootStatus").textContent=error.message;});
+      boot();
+    })();
   </script>
 </body>
 </html>
-
