@@ -134,13 +134,36 @@
         });
       };
 
+      // Firebase may serialize sparse arrays as objects and omit null entries.
+      function normalizeCloudSheets(data) {
+        if (!data || !data.sheets || typeof data.sheets !== 'object' || Array.isArray(data.sheets)) {
+          throw new Error('Invalid cloud sheets');
+        }
+        function indexedArray(value, emptyValue) {
+          if (value == null) return [];
+          if (Array.isArray(value)) return Array.from(value, item => item == null ? emptyValue() : item);
+          if (typeof value !== 'object') throw new Error('Invalid cloud table');
+          const keys = Object.keys(value);
+          if (keys.some(key => !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) > 100000)) {
+            throw new Error('Invalid cloud array index');
+          }
+          const length = keys.length ? Math.max(...keys.map(Number)) + 1 : 0;
+          return Array.from({ length }, (_, index) => value[index] == null ? emptyValue() : value[index]);
+        }
+        const sheets = {};
+        for (const [name, table] of Object.entries(data.sheets)) {
+          sheets[name] = indexedArray(table, () => []).map(row => indexedArray(row, () => null));
+        }
+        return { ...data, sheets };
+      }
+
       // Firebase 클라우드 읽기/쓰기 헬퍼
       async function readCloud(key) {
         if (!hasFirebase) return null;
         try {
           const res = await fetch(`${cleanFbUrl}/workout/${key}.json`, { cache: 'no-store' });
           if (!res.ok) return null;
-          return await res.json();
+          return normalizeCloudSheets(await res.json());
         } catch (_) {
           return null;
         }
