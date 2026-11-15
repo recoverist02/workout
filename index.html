@@ -157,73 +157,62 @@
         return { ...data, sheets };
       }
 
-      // Firebase 클라우드 읽기/쓰기 헬퍼
-      async function readCloud(key) {
-        if (!hasFirebase) return null;
-        try {
-          const res = await fetch(`${cleanFbUrl}/workout/${key}.json`, { cache: 'no-store' });
-          if (!res.ok) return null;
-          return normalizeCloudSheets(await res.json());
-        } catch (_) {
-          return null;
-        }
+      // Authoritative reads; local app cache still provides the initial fast paint.
+      let sheetQueue = Promise.resolve();
+      let cloudQueue = Promise.resolve();
+      let cloudWritesEnabled = true;
+      function enqueueSheet(work) {
+        const task = sheetQueue.then(work);
+        sheetQueue = task.catch(() => {});
+        return task;
       }
-
-      async function writeCloud(key, data) {
-        if (!hasFirebase || !data || data.ok === false) return;
-        try {
-          await fetch(`${cleanFbUrl}/workout/${key}.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
+      function queueCloud(key, data) {
+        const snapshot = JSON.parse(JSON.stringify(data));
+        cloudQueue = cloudQueue.then(async () => {
+          if (!hasFirebase || !cloudWritesEnabled) return;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5000);
+          try {
+            const response = await fetch(`${cleanFbUrl}/workout/${key}.json`, {
+              method: 'PUT', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(snapshot), signal: controller.signal
+            });
+            if (!response.ok) throw new Error('Cloud cache update failed');
+          } catch (_) {
+            // An uncertain write must not race a later cache write in this session.
+            cloudWritesEnabled = false;
+          } finally { clearTimeout(timer); }
+        }).catch(() => { cloudWritesEnabled = false; });
+      }
+      async function readSheet(scope) {
+        const fresh = await window.__workoutBridgeCall({
+          action: 'read', scope: scope === 'extra' ? 'extra' : undefined
+        });
+        if (!fresh || fresh.ok === false || !fresh.sheets) {
+          throw new Error(fresh?.error || '최신 시트 자료를 확인하지 못했어. 새로고침 후 다시 확인해줘.');
+        }
+        const normalized = normalizeCloudSheets(fresh);
+        queueCloud(scope === 'extra' ? 'state_extra' : 'state_main', normalized);
+        return normalized;
+      }
+      window.__workoutHybridCall = (payload) => enqueueSheet(async () => {
+        if (!payload) throw new Error('요청을 확인해줘.');
+        if (payload.action === 'read') return readSheet(payload.scope);
+        const result = await window.__workoutBridgeCall(payload);
+        if (!result || result.ok === false) return result;
+        if (['save', 'saveRecord', 'deleteRecord'].includes(payload.action)) {
+          if (result.sheets) {
+            queueCloud('state_main', normalizeCloudSheets(result));
+          }
+          // Schedule one refresh after a mutation, not after status/score probes.
+          // The refresh shares the same queue, so older reads cannot overtake it.
+          enqueueSheet(async () => {
+            if (!result.sheets) { try { await readSheet(); } catch (_) {} }
+            try { await readSheet('extra'); } catch (_) {}
           });
-        } catch (_) {}
-      }
-
-      // 구글 시트 원본과 클라우드 DB 백그라운드 동기화
-      async function syncSheetToCloud(scope) {
-        const key = scope === 'extra' ? 'state_extra' : 'state_main';
-        try {
-          const fresh = await window.__workoutBridgeCall({ action: 'read', scope: scope === 'extra' ? 'extra' : undefined });
-          if (fresh && fresh.ok !== false) {
-            await writeCloud(key, fresh);
-          }
-          return fresh;
-        } catch (_) {
-          return null;
         }
-      }
-
-      // 하이브리드(클라우드 초고속 읽기 + 구글 시트 원본 저장) 라우터
-      window.__workoutHybridCall = async (payload) => {
-        if (payload && payload.action === 'read') {
-          const key = payload.scope === 'extra' ? 'state_extra' : 'state_main';
-          const cloudData = await readCloud(key);
-          if (cloudData && cloudData.ok !== false) {
-            // 클라우드 데이터를 0.1초 만에 즉시 반환하고, 뒤에서 조용히 시트 원본과 동기화
-            syncSheetToCloud(payload.scope);
-            return cloudData;
-          }
-          // 최초 1회(클라우드가 비어있을 때) 시트에서 읽어와 클라우드에 채움
-          const sheetData = await window.__workoutBridgeCall(payload);
-          if (sheetData && sheetData.ok !== false) {
-            writeCloud(key, sheetData);
-          }
-          return sheetData;
-        }
-
-        // 기록 저장·수정·삭제 시: 구글 시트에 원본 기록 후 클라우드 최신화
-        const res = await window.__workoutBridgeCall(payload);
-        if (res && res.ok !== false) {
-          if (payload.action === 'save' && res.sheets) {
-            writeCloud('state_main', res);
-          } else {
-            syncSheetToCloud();
-            syncSheetToCloud('extra');
-          }
-        }
-        return res;
-      };
+        return result;
+      });
 
       function injectBridgeIntoAppHtml(rawHtml) {
         const closeTag = '<' + '/script>';
