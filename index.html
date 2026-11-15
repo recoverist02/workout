@@ -71,10 +71,76 @@
       const GAS_URL = 'https://script.google.com/macros/s/AKfycbwPdMt8y24U1ScTMCSqTEX3EOnjSzGlOTN1ffndNBKKIzBps6t2lLLdadHP0wbfJUwn/exec';
       const CHANNEL = 'workout-sheets-v1';
 
+      const TABLE_WIDTHS = {
+        '운동기록': 16, '운동리스트': 4, '현황': 21, '신체수치': 9,
+        '목표': 12, '신체수치현황': 24, '운동계획': 6, '식단계획': 5,
+        '건강데이터': 8, '주간브리핑': 10, '브리핑이력': 17
+      };
+
       const appFrame = document.getElementById('appFrame');
       const bootOverlay = document.getElementById('bootOverlay');
       const bootStatus = document.getElementById('bootStatus');
       const cleanFbUrl = FIREBASE_DB_URL.replace(/\/+$/, '');
+
+      // [핵심] Firebase가 숫자 키 객체({"0":..., "15":...})로 변환한 행과 테이블을 100% 정상 2차원 배열로 복원
+      function normalizeRow(rawRow, width) {
+        if (rawRow == null || typeof rawRow !== 'object') {
+          return Array.from({ length: width || 0 }, () => null);
+        }
+        const numKeys = Array.isArray(rawRow)
+          ? []
+          : Object.keys(rawRow).map(Number).filter(Number.isFinite);
+        const maxIdx = Array.isArray(rawRow)
+          ? rawRow.length
+          : (numKeys.length ? Math.max(...numKeys) + 1 : 0);
+        const len = width || maxIdx;
+        return Array.from({ length: len }, (_, i) => {
+          const v = rawRow[i];
+          return v === undefined || v === '' ? null : v;
+        });
+      }
+
+      function normalizeSheets(rawSheets) {
+        if (!rawSheets || typeof rawSheets !== 'object') return {};
+        const out = {};
+        for (const [name, table] of Object.entries(rawSheets)) {
+          const width = TABLE_WIDTHS[name] || 0;
+          if (!table || typeof table !== 'object') {
+            out[name] = [];
+            continue;
+          }
+          const rowsList = Array.isArray(table)
+            ? table
+            : Object.keys(table)
+                .map(Number)
+                .filter(Number.isFinite)
+                .sort((a, b) => a - b)
+                .map(k => table[k]);
+
+          out[name] = rowsList
+            .filter(r => r != null && typeof r === 'object')
+            .map(r => normalizeRow(r, width));
+        }
+        return out;
+      }
+
+      function unpackCloudPayload(d) {
+        if (!d || d.ok === false) return null;
+        if (typeof d.sheetsJSON === 'string') {
+          try {
+            d.sheets = normalizeSheets(JSON.parse(d.sheetsJSON));
+            return d;
+          } catch (_) {}
+        }
+        if (d.sheets) {
+          d.sheets = normalizeSheets(d.sheets);
+          return d;
+        }
+        return null;
+      }
+
+      window.__normalizeWorkoutSheets = normalizeSheets;
+      window.__normalizeWorkoutRow = normalizeRow;
 
       // 1. 페이지 시작 즉시 클라우드 데이터와 app.html을 병렬로 프리패치
       let cachedMain = null;
@@ -84,7 +150,8 @@
       const prefetchMainPromise = fetch(`${cleanFbUrl}/workout/state_main.json`, { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : null))
         .then(d => {
-          if (d && d.ok !== false && d.sheets) cachedMain = d;
+          const unpacked = unpackCloudPayload(d);
+          if (unpacked) cachedMain = unpacked;
           return cachedMain;
         })
         .catch(() => null);
@@ -92,7 +159,8 @@
       const prefetchExtraPromise = fetch(`${cleanFbUrl}/workout/state_extra.json`, { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : null))
         .then(d => {
-          if (d && d.ok !== false && d.sheets) cachedExtra = d;
+          const unpacked = unpackCloudPayload(d);
+          if (unpacked) cachedExtra = unpacked;
           return cachedExtra;
         })
         .catch(() => null);
@@ -154,7 +222,7 @@
         });
       };
 
-      // 3. 수행점수 즉시 계산 함수 (시트 수식과 100% 동일)
+      // 3. 수행점수 즉시 계산 함수 (시트 수식과 동일)
       function calcWorkoutScore(row) {
         if (!Array.isArray(row)) return null;
         if (row[2] === '유산소') {
@@ -169,26 +237,32 @@
 
       async function writeCloud(key, data) {
         if (!data || data.ok === false) return;
+        const cleanSheets = normalizeSheets(data.sheets || {});
+        const payloadToSave = {
+          ...data,
+          sheets: cleanSheets,
+          sheetsJSON: JSON.stringify(cleanSheets)
+        };
         try {
           await fetch(`${cleanFbUrl}/workout/${key}.json`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
+            body: JSON.stringify(payloadToSave)
           });
         } catch (_) {}
       }
 
-      // 백그라운드 시트 백업 (클라우드 저장 완료 후 비동기 실행)
+      // 백그라운드 시트 백업
       function backupToSheetInBackground(payload, seq) {
         window.__workoutBridgeCall(payload)
           .then(res => {
             if (seq !== latestWriteSeq || !res || res.ok === false) return;
-            // 시트에서 계산된 정밀 점수가 있으면 조용히 클라우드에 반영
-            if (payload.action === 'saveRecord' && res.row && cachedMain?.sheets?.[payload.table]) {
+            if (payload.action === 'saveRecord' && res.row && Array.isArray(cachedMain?.sheets?.[payload.table])) {
               const rows = cachedMain.sheets[payload.table];
-              const idx = rows.findIndex((r, i) => i > 0 && String(r[0]) === String(res.row[0]));
+              const cleanRow = normalizeRow(res.row, TABLE_WIDTHS[payload.table]);
+              const idx = rows.findIndex((r, i) => i > 0 && String(r[0]) === String(cleanRow[0]));
               if (idx > 0) {
-                rows[idx] = res.row;
+                rows[idx] = cleanRow;
                 writeCloud('state_main', cachedMain);
               }
             }
@@ -200,22 +274,24 @@
       window.__workoutHybridCall = async (payload) => {
         const started = performance.now();
 
-        // [조회] 클라우드에서 0.1초 만에 즉시 반환
+        // [조회] 클라우드에서 0.1초 만에 정규화된 2차원 배열로 반환
         if (payload && payload.action === 'read') {
           const isExtra = payload.scope === 'extra';
           if (isExtra) {
             const extra = cachedExtra || (await prefetchExtraPromise);
             if (extra && extra.sheets) {
-              return { ...extra, source: 'sheets', bridgeReady: true, protocol: 2, timing: { totalMs: performance.now() - started } };
+              return { ...extra, sheets: normalizeSheets(extra.sheets), source: 'sheets', bridgeReady: true, protocol: 2, timing: { totalMs: performance.now() - started } };
             }
             if (cachedMain && cachedMain.sheets) {
-              return { ok: true, source: 'sheets', sheets: cachedMain.sheets, revision: cachedMain.revision || '1', initialized: true, protocol: 2, timing: { totalMs: performance.now() - started } };
+              return { ok: true, source: 'sheets', sheets: normalizeSheets(cachedMain.sheets), revision: cachedMain.revision || '1', initialized: true, protocol: 2, timing: { totalMs: performance.now() - started } };
             }
           } else {
             const main = cachedMain || (await prefetchMainPromise);
             const extra = cachedExtra || (await prefetchExtraPromise);
             if (main && main.sheets) {
-              const mergedSheets = extra && extra.sheets ? { ...extra.sheets, ...main.sheets } : main.sheets;
+              const mergedSheets = normalizeSheets(
+                extra && extra.sheets ? { ...extra.sheets, ...main.sheets } : main.sheets
+              );
               cachedMain = {
                 ...main,
                 ok: true,
@@ -230,9 +306,9 @@
             }
           }
 
-          // 클라우드가 완전히 비어있는 최초 1회에만 시트에서 읽어와 클라우드 초기화
           const sheetData = await window.__workoutBridgeCall(payload);
           if (sheetData && sheetData.ok !== false) {
+            sheetData.sheets = normalizeSheets(sheetData.sheets);
             if (isExtra) {
               cachedExtra = sheetData;
               await writeCloud('state_extra', sheetData);
@@ -244,16 +320,17 @@
           return sheetData;
         }
 
-        // [단건 기록 저장·수정] 클라우드 즉시 저장 후 시트는 백그라운드 백업
+        // [단건 기록 저장·수정] 클라우드 즉시 저장 + 시트 백그라운드 백업
         if (payload && payload.action === 'saveRecord') {
           const main = cachedMain || (await prefetchMainPromise);
           if (!main || !main.sheets) throw new Error('클라우드 데이터를 먼저 불러와줘.');
+          const sheets = normalizeSheets(main.sheets);
           const table = payload.table;
-          const row = [...payload.row];
+          const row = normalizeRow(payload.row, TABLE_WIDTHS[table]);
           if (table === '운동기록') {
             row[15] = calcWorkoutScore(row);
           }
-          const rows = [...(main.sheets[table] || [])];
+          const rows = Array.isArray(sheets[table]) ? [...sheets[table]] : [];
           const idx = rows.findIndex((r, i) => i > 0 && String(r[0]) === String(row[0]));
           if (idx > 0) rows[idx] = row;
           else rows.push(row);
@@ -263,7 +340,7 @@
             ...main,
             revision: nextRev,
             updatedAt: Date.now(),
-            sheets: { ...main.sheets, [table]: rows }
+            sheets: { ...sheets, [table]: rows }
           };
 
           const mySeq = ++latestWriteSeq;
@@ -283,20 +360,21 @@
           };
         }
 
-        // [단건 기록 삭제] 클라우드 즉시 삭제 후 시트는 백그라운드 백업
+        // [단건 기록 삭제] 클라우드 즉시 삭제 + 시트 백그라운드 백업
         if (payload && payload.action === 'deleteRecord') {
           const main = cachedMain || (await prefetchMainPromise);
           if (!main || !main.sheets) throw new Error('클라우드 데이터를 먼저 불러와줘.');
+          const sheets = normalizeSheets(main.sheets);
           const table = payload.table;
           const id = String(payload.id);
-          const rows = (main.sheets[table] || []).filter((r, i) => i === 0 || String(r[0]) !== id);
+          const rows = (Array.isArray(sheets[table]) ? sheets[table] : []).filter((r, i) => i === 0 || String(r[0]) !== id);
 
           const nextRev = String(Date.now());
           cachedMain = {
             ...main,
             revision: nextRev,
             updatedAt: Date.now(),
-            sheets: { ...main.sheets, [table]: rows }
+            sheets: { ...sheets, [table]: rows }
           };
 
           const mySeq = ++latestWriteSeq;
@@ -319,7 +397,8 @@
         // [점수/상태 확인] 클라우드 메모리에서 즉시 응답
         if (payload && (payload.action === 'recordScore' || payload.action === 'recordStatus')) {
           const main = cachedMain || (await prefetchMainPromise);
-          const rows = main?.sheets?.[payload.table] || [];
+          const sheets = normalizeSheets(main?.sheets || {});
+          const rows = Array.isArray(sheets[payload.table]) ? sheets[payload.table] : [];
           const found = rows.find((r, i) => i > 0 && String(r[0]) === String(payload.id)) || null;
           return {
             ok: true,
@@ -333,10 +412,11 @@
           };
         }
 
-        // [전체 테이블 저장] 클라우드 즉시 저장 후 시트 백그라운드 백업
+        // [전체 테이블 저장] 클라우드 즉시 저장 + 시트 백그라운드 백업
         if (payload && payload.action === 'save') {
           const main = cachedMain || (await prefetchMainPromise);
           const nextRev = String(Date.now());
+          const merged = normalizeSheets({ ...(main?.sheets || {}), ...payload.sheets });
           cachedMain = {
             ...(main || {}),
             ok: true,
@@ -347,11 +427,11 @@
             partial: false,
             revision: nextRev,
             updatedAt: Date.now(),
-            sheets: { ...(main?.sheets || {}), ...payload.sheets }
+            sheets: merged
           };
           const mySeq = ++latestWriteSeq;
           await writeCloud('state_main', cachedMain);
-          backupToSheetInBackground(payload, mySeq);
+          backupToSheetInBackground({ ...payload, sheets: merged }, mySeq);
           return { ...cachedMain, timing: { totalMs: performance.now() - started } };
         }
 
@@ -364,7 +444,36 @@
           '<script>\n' +
           '(() => {\n' +
           '  const USER_ID = "recoverist02";\n' +
+          '  // 브라우저 localStorage에 남아있는 이전 객체형 캐시를 정상 배열로 즉시 복원\n' +
+          '  try {\n' +
+          '    const ck = "workout-cache-v1:" + USER_ID;\n' +
+          '    const rawCache = localStorage.getItem(ck);\n' +
+          '    if (rawCache && window.parent.__normalizeWorkoutSheets) {\n' +
+          '      const parsed = JSON.parse(rawCache);\n' +
+          '      if (parsed && parsed.sheets) {\n' +
+          '        parsed.sheets = window.parent.__normalizeWorkoutSheets(parsed.sheets);\n' +
+          '        localStorage.setItem(ck, JSON.stringify(parsed));\n' +
+          '      }\n' +
+          '    }\n' +
+          '    const pk = "workout-pending-v1:" + USER_ID;\n' +
+          '    const rawPending = localStorage.getItem(pk);\n' +
+          '    if (rawPending && window.parent.__normalizeWorkoutRow) {\n' +
+          '      const p = JSON.parse(rawPending);\n' +
+          '      if (p && p.row) {\n' +
+          '        p.row = window.parent.__normalizeWorkoutRow(p.row, p.key === "운동기록" ? 16 : 9);\n' +
+          '        localStorage.setItem(pk, JSON.stringify(p));\n' +
+          '      }\n' +
+          '    }\n' +
+          '  } catch (_) {\n' +
+          '    localStorage.removeItem("workout-cache-v1:" + USER_ID);\n' +
+          '  }\n' +
           '  function makeResponse(data, status) {\n' +
+          '    if (data && data.sheets && window.parent.__normalizeWorkoutSheets) {\n' +
+          '      data.sheets = window.parent.__normalizeWorkoutSheets(data.sheets);\n' +
+          '    }\n' +
+          '    if (data && data.row && window.parent.__normalizeWorkoutRow) {\n' +
+          '      data.row = window.parent.__normalizeWorkoutRow(data.row, data.table === "운동기록" ? 16 : 9);\n' +
+          '    }\n' +
           '    return {\n' +
           '      ok: status >= 200 && status < 300,\n' +
           '      status: status,\n' +
