@@ -76,6 +76,32 @@ Error generating stack: `+e.message+`
   }
 }
 </style>
+<style id="workout-status-compact">
+@media (max-width: 700px) {
+  .workspace main > .toolbar + .filter-chips {
+    flex-wrap: nowrap;
+    gap: 3px;
+    margin-bottom: 8px;
+  }
+  .workspace main > .toolbar + .filter-chips > button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 6px 2px;
+    white-space: nowrap;
+  }
+  .workspace main > .toolbar + .filter-chips + .card .status-table td {
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+  .workspace main > .toolbar + .filter-chips + .card .status-table td small {
+    margin-top: 1px;
+  }
+  .workspace main > .toolbar + .filter-chips + .card .status-date-group th {
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+}
+</style>
 </head><body><div id="root"><div class="boot">운동기록01<small>나의 트레이닝 노트</small></div></div><noscript>운동기록 앱을 사용하려면 자바스크립트를 켜줘.</noscript><script>(()=>{
  if(!('serviceWorker' in navigator))return;
  const register=()=>navigator.serviceWorker.register('/sw.js',{scope:'/',updateViaCache:'none'}).then(()=>{document.documentElement.dataset.shellCache='registered'}).catch(()=>{document.documentElement.dataset.shellCache='unavailable'});
