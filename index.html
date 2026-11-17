@@ -327,7 +327,14 @@
             const extra = cachedExtra || (await prefetchExtraPromise);
             if (main && main.sheets) {
               const mergedSheets = normalizeSheets(
-                extra && extra.sheets ? { ...extra.sheets, ...main.sheets } : main.sheets
+                extra && extra.sheets
+  ? {
+      ...main.sheets,
+      ...(extra.sheets['건강데이터']
+        ? { '건강데이터': extra.sheets['건강데이터'] }
+        : {})
+    }
+  : main.sheets
               );
               cachedMain = {
                 ...main,
