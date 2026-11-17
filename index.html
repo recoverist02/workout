@@ -278,13 +278,50 @@
         if (payload && payload.action === 'read') {
           const isExtra = payload.scope === 'extra';
           if (isExtra) {
-            const extra = cachedExtra || (await prefetchExtraPromise);
-            if (extra && extra.sheets) {
-              return { ...extra, sheets: normalizeSheets(extra.sheets), source: 'sheets', bridgeReady: true, protocol: 2, timing: { totalMs: performance.now() - started } };
+            // 걸음수·수면은 시트에 별도로 들어오므로 최신값을 조회한다.
+            const fresh = await window.__workoutBridgeCall({
+              action: 'read',
+              scope: 'extra'
+            });
+
+            if (!fresh || fresh.ok === false || !fresh.sheets) {
+              throw new Error(
+                fresh?.error ||
+                '걸음수·수면 최신 데이터를 불러오지 못했어. 새로고침해서 다시 시도해줘.'
+              );
             }
-            if (cachedMain && cachedMain.sheets) {
-              return { ok: true, source: 'sheets', sheets: normalizeSheets(cachedMain.sheets), revision: cachedMain.revision || '1', initialized: true, protocol: 2, timing: { totalMs: performance.now() - started } };
+
+            const sheets = normalizeSheets(fresh.sheets);
+            cachedExtra = { ...fresh, sheets };
+
+            // 운동기록 등 편집 가능한 데이터는 그대로 유지한다.
+            const editable = new Set([
+              '운동기록', '신체수치', '운동리스트',
+              '목표', '운동계획', '식단계획'
+            ]);
+            const extras = Object.fromEntries(
+              Object.entries(sheets).filter(
+                ([name]) => !editable.has(name)
+              )
+            );
+
+            if (cachedMain) {
+              cachedMain = {
+                ...cachedMain,
+                sheets: { ...cachedMain.sheets, ...extras }
+              };
             }
+
+            // 다음 접속에서도 사용할 수 있도록 추가 데이터 캐시 갱신
+            void writeCloud('state_extra', cachedExtra);
+
+            return {
+              ...cachedExtra,
+              source: 'sheets',
+              bridgeReady: true,
+              protocol: 2,
+              timing: { totalMs: performance.now() - started }
+            };
           } else {
             const main = cachedMain || (await prefetchMainPromise);
             const extra = cachedExtra || (await prefetchExtraPromise);
