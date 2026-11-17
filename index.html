@@ -165,7 +165,7 @@
         })
         .catch(() => null);
 
-      const prefetchShellPromise = fetch('./app.html')
+      const prefetchShellPromise = fetch('./app.html?v=status-compact-2', { cache: 'no-store' })
         .then(r => (r.ok ? r.text() : null))
         .catch(() => null);
 
