@@ -60,7 +60,7 @@
 <body>
   <div id="bootOverlay">
     <div class="boot-title">운동기록01</div>
-    <div class="boot-sub" id="bootStatus">클라우드에서 초고속으로 불러오는 중…</div>
+    <div class="boot-sub" id="bootStatus">클라우드에서 초고속으로 불러오는 중...</div>
   </div>
 
   <iframe id="appFrame" title="운동기록01"></iframe>
@@ -141,10 +141,12 @@
 
       window.__normalizeWorkoutSheets = normalizeSheets;
       window.__normalizeWorkoutRow = normalizeRow;
+      window.__workoutTableWidths = TABLE_WIDTHS;
 
       // 1. 페이지 시작 즉시 클라우드 데이터와 app.html을 병렬로 프리패치
       let cachedMain = null;
       let cachedExtra = null;
+      let cachedShellHtml = null;
       let latestWriteSeq = 0;
 
       const prefetchMainPromise = fetch(`${cleanFbUrl}/workout/state_main.json`, { cache: 'no-store' })
@@ -198,7 +200,7 @@
       bridgeFrame.title = '운동기록01 시트 백업 연결';
       bridgeFrame.setAttribute('aria-hidden', 'true');
       bridgeFrame.tabIndex = -1;
-      bridgeFrame.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;border:0';
+      bridgeFrame.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;border:0;';
       bridgeFrame.src = GAS_URL + '?bridge=1';
       document.body.appendChild(bridgeFrame);
 
@@ -325,16 +327,17 @@
           } else {
             const main = cachedMain || (await prefetchMainPromise);
             const extra = cachedExtra || (await prefetchExtraPromise);
+
             if (main && main.sheets) {
               const mergedSheets = normalizeSheets(
                 extra && extra.sheets
-  ? {
-      ...main.sheets,
-      ...(extra.sheets['건강데이터']
-        ? { '건강데이터': extra.sheets['건강데이터'] }
-        : {})
-    }
-  : main.sheets
+                  ? {
+                      ...main.sheets,
+                      ...(extra.sheets['건강데이터']
+                        ? { '건강데이터': extra.sheets['건강데이터'] }
+                        : {})
+                    }
+                  : main.sheets
               );
               cachedMain = {
                 ...main,
@@ -482,12 +485,1330 @@
         return window.__workoutBridgeCall(payload);
       };
 
+      // 5. 저장 직후 네트워크 재요청 없이 즉시 iframe UI만 새로고침하고 현재 탭/칩 복원
+      window.__pendingWorkoutRestore = null;
+      window.__getWorkoutSheetsSnapshot = async () => {
+        const main = cachedMain || (await prefetchMainPromise);
+        if (main && main.sheets) return normalizeSheets(main.sheets);
+        const res = await window.__workoutHybridCall({ action: 'read' });
+        return normalizeSheets(res?.sheets || {});
+      };
+      window.__reloadWorkoutApp = (restoreState) => {
+        window.__pendingWorkoutRestore = restoreState || null;
+        if (cachedShellHtml) {
+          appFrame.srcdoc = injectBridgeIntoAppHtml(cachedShellHtml);
+        } else {
+          window.location.reload();
+        }
+      };
+
+      // 6. app.html 내부에 주입되어 운동·식단 탭을 확장하는 UI 모듈
+      //    - 운동계획: 상단 '+ 운동 기록' 제거 → '+ 운동종목 추가' 배치 + '계획 수정' 모달
+      //    - 식단계획: 상단 '+ 운동 기록' 및 '+ 운동종목 추가' 숨김 + '계획 수정' 모달
+      function __workoutPlanEnhancerBootstrap() {
+        const USER_ID = 'recoverist02';
+        const CACHE_KEY = 'workout-cache-v1:' + USER_ID;
+        const BODY_PARTS = ['등', '가슴', '어깨', '팔', '하체', '복근', '전신'];
+        const PART_COLORS = {
+          '등': '#15803d', '가슴': '#b45309', '어깨': '#7e22ce',
+          '팔': '#262626', '하체': '#5c741c', '복근': '#B01875', '전신': '#737373'
+        };
+        const ROUTINE_NAMES = ['상체', '하체', '보강'];
+        const DIET_NAMES = ['린매스업', '유지', '감량'];
+        const MEAL_ORDER = ['아침', '점심', '오후간식', '저녁', '운동후'];
+
+        function injectStyles() {
+          if (document.getElementById('wpe-styles')) return;
+          const style = document.createElement('style');
+          style.id = 'wpe-styles';
+          style.textContent = `
+            button[data-wpe-add-exercise] { order: 999; }
+            .wpe-edit-chip-btn {
+              order: 999;
+              margin-left: auto;
+              padding: 6px 12px;
+              border-radius: 999px;
+              border: 1px solid #c7d7cc;
+              background: #ffffff;
+              color: #2d6a4f;
+              font-size: 13px;
+              font-weight: 700;
+              cursor: pointer;
+              display: inline-flex;
+              align-items: center;
+              gap: 4px;
+              white-space: nowrap;
+              flex-shrink: 0;
+              transition: background 0.15s ease, border-color 0.15s ease;
+            }
+            .wpe-edit-chip-btn:hover { background: #edf5ef; border-color: #2d6a4f; }
+            .wpe-edit-chip-btn:active { transform: scale(0.98); }
+
+            .wpe-backdrop {
+              position: fixed;
+              inset: 0;
+              background: rgba(20, 34, 26, 0.48);
+              z-index: 9999;
+              display: flex;
+              align-items: flex-end;
+              justify-content: center;
+              padding: 0;
+            }
+            @media (min-width: 640px) {
+              .wpe-backdrop { align-items: center; padding: 20px; }
+            }
+            .wpe-modal {
+              width: 100%;
+              max-width: 520px;
+              max-height: 88vh;
+              background: #f6f8f4;
+              color: #24362b;
+              border-radius: 20px 20px 0 0;
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
+              box-shadow: 0 20px 50px rgba(0,0,0,0.22);
+              font-family: system-ui, -apple-system, "Noto Sans KR", sans-serif;
+            }
+            @media (min-width: 640px) {
+              .wpe-modal { border-radius: 20px; max-height: 84vh; }
+            }
+            .wpe-head {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 16px 18px 14px;
+              background: #ffffff;
+              border-bottom: 1px solid #e6ece7;
+            }
+            .wpe-head h3 {
+              margin: 0;
+              font-size: 17px;
+              font-weight: 800;
+              color: #1f3327;
+            }
+            .wpe-close {
+              border: 0;
+              background: #eef3ef;
+              color: #35503f;
+              width: 32px;
+              height: 32px;
+              border-radius: 999px;
+              font-size: 18px;
+              line-height: 1;
+              cursor: pointer;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+            }
+            .wpe-body {
+              padding: 16px 18px;
+              overflow-y: auto;
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              gap: 14px;
+            }
+            .wpe-foot {
+              padding: 12px 18px calc(14px + env(safe-area-inset-bottom, 0px));
+              background: #ffffff;
+              border-top: 1px solid #e6ece7;
+              display: flex;
+              gap: 8px;
+              justify-content: flex-end;
+            }
+            .wpe-card {
+              background: #ffffff;
+              border: 1px solid #e5ece6;
+              border-radius: 14px;
+              padding: 14px;
+              display: flex;
+              flex-direction: column;
+              gap: 10px;
+            }
+            .wpe-label {
+              font-size: 12px;
+              font-weight: 700;
+              color: #5b6e62;
+              margin-bottom: 4px;
+              display: block;
+            }
+            .wpe-seg {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 6px;
+              background: #edf2ee;
+              padding: 4px;
+              border-radius: 12px;
+            }
+            .wpe-seg button {
+              border: 0;
+              background: transparent;
+              padding: 8px 10px;
+              border-radius: 9px;
+              font-size: 14px;
+              font-weight: 700;
+              color: #5b6e62;
+              cursor: pointer;
+            }
+            .wpe-seg button.on {
+              background: #ffffff;
+              color: #1f3327;
+              box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            }
+            .wpe-chips {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 6px;
+            }
+            .wpe-chip {
+              border: 1px solid #d9e3dc;
+              background: #ffffff;
+              color: #465b4e;
+              padding: 6px 11px;
+              border-radius: 999px;
+              font-size: 13px;
+              font-weight: 700;
+              cursor: pointer;
+            }
+            .wpe-chip.on {
+              background: #e5f1e8;
+              border-color: #2d6a4f;
+              color: #235740;
+            }
+            .wpe-input, .wpe-select {
+              width: 100%;
+              padding: 10px 12px;
+              border: 1px solid #d5e0d8;
+              border-radius: 10px;
+              background: #ffffff;
+              color: #1f3327;
+              font-size: 14px;
+              outline: none;
+            }
+            .wpe-input:focus, .wpe-select:focus { border-color: #2d6a4f; }
+            .wpe-btn {
+              border: 1px solid #d4dfd7;
+              background: #ffffff;
+              color: #2d4436;
+              padding: 10px 14px;
+              border-radius: 11px;
+              font-size: 14px;
+              font-weight: 700;
+              cursor: pointer;
+            }
+            .wpe-btn.primary {
+              border-color: #2f6b4f;
+              background: #2f6b4f;
+              color: #ffffff;
+            }
+            .wpe-btn.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+            .wpe-btn.sm {
+              padding: 6px 10px;
+              font-size: 12px;
+              border-radius: 8px;
+            }
+            .wpe-btn.danger {
+              border-color: #f0d0d0;
+              background: #fff5f5;
+              color: #c53030;
+            }
+            .wpe-row {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              padding: 9px 10px;
+              border: 1px solid #e9efe9;
+              border-radius: 10px;
+              background: #fbfdfb;
+            }
+            .wpe-row-num {
+              width: 24px;
+              font-size: 12px;
+              font-weight: 800;
+              color: #7c8d82;
+              text-align: center;
+              flex-shrink: 0;
+            }
+            .wpe-row-main {
+              flex: 1;
+              min-width: 0;
+              display: flex;
+              align-items: center;
+              gap: 6px;
+              flex-wrap: wrap;
+            }
+            .wpe-row-name {
+              font-size: 14px;
+              font-weight: 800;
+              word-break: keep-all;
+            }
+            .wpe-badge {
+              font-size: 11px;
+              font-weight: 700;
+              padding: 2px 7px;
+              border-radius: 999px;
+              background: #eef3ef;
+              color: #53685b;
+            }
+            .wpe-icon-btn {
+              border: 1px solid #d9e3dc;
+              background: #ffffff;
+              color: #35503f;
+              width: 28px;
+              height: 28px;
+              border-radius: 8px;
+              font-size: 12px;
+              font-weight: 800;
+              cursor: pointer;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              flex-shrink: 0;
+            }
+            .wpe-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+            .wpe-icon-btn.del { border-color: #f1d2d2; color: #c53030; background: #fff7f7; }
+            .wpe-meal-head {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 8px;
+            }
+            .wpe-meal-title {
+              font-size: 14px;
+              font-weight: 800;
+              color: #1f3327;
+            }
+            .wpe-meal-kcal {
+              font-size: 12px;
+              font-weight: 700;
+              color: #2d6a4f;
+              background: #eaf4ec;
+              padding: 3px 9px;
+              border-radius: 999px;
+            }
+            .wpe-diet-item {
+              display: grid;
+              grid-template-columns: 1fr 82px 28px;
+              gap: 6px;
+              align-items: center;
+            }
+            .wpe-diet-item input {
+              padding: 8px 9px;
+              font-size: 13px;
+            }
+            .wpe-diet-summary {
+              background: #e7f2ea;
+              border-radius: 12px;
+              padding: 12px 14px;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+            }
+            .wpe-diet-summary strong {
+              font-size: 18px;
+              color: #235740;
+            }
+            .wpe-error {
+              color: #c53030;
+              font-size: 12px;
+              font-weight: 700;
+            }
+            .wpe-empty {
+              font-size: 13px;
+              color: #7c8d82;
+              text-align: center;
+              padding: 12px 6px;
+            }
+            .wpe-toast {
+              position: fixed;
+              left: 50%;
+              bottom: calc(78px + env(safe-area-inset-bottom, 0px));
+              transform: translateX(-50%);
+              background: #1f3327;
+              color: #ffffff;
+              padding: 10px 16px;
+              border-radius: 999px;
+              font-size: 13px;
+              font-weight: 700;
+              z-index: 10000;
+              box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+              white-space: nowrap;
+            }
+          `;
+          document.head.appendChild(style);
+        }
+
+        function showToast(msg) {
+          const old = document.querySelector('.wpe-toast');
+          if (old) old.remove();
+          const el = document.createElement('div');
+          el.className = 'wpe-toast';
+          el.textContent = msg;
+          document.body.appendChild(el);
+          setTimeout(() => el.remove(), 2200);
+        }
+
+        function nextNumericId(rows, fallbackStart) {
+          let maxId = fallbackStart - 1;
+          for (let i = 1; i < rows.length; i++) {
+            const n = Number(rows[i]?.[0]);
+            if (Number.isFinite(n) && n > maxId) maxId = n;
+          }
+          return maxId + 1;
+        }
+
+        function updateLocalCache(sheets, revision) {
+          try {
+            const raw = localStorage.getItem(CACHE_KEY);
+            const parsed = raw ? JSON.parse(raw) : {};
+            parsed.sheets = sheets;
+            if (revision) parsed.revision = revision;
+            parsed.updatedAt = Date.now();
+            localStorage.setItem(CACHE_KEY, JSON.stringify(parsed));
+          } catch (_) {}
+        }
+
+        async function saveUpdatedSheets(nextSheets, restoreState, toastMsg) {
+          if (!nextSheets || !Array.isArray(nextSheets['운동기록']) || nextSheets['운동기록'].length < 1 || !Array.isArray(nextSheets['운동리스트']) || nextSheets['운동리스트'].length < 1) {
+            throw new Error('클라우드 원본 데이터가 완전히 로드되지 않았습니다. 잠시 후 다시 시도해 주세요.');
+          }
+          const res = await window.parent.__workoutHybridCall({
+            action: 'save',
+            sheets: nextSheets
+          });
+          if (!res || res.ok === false) {
+            throw new Error(res?.error || '저장에 실패했습니다.');
+          }
+          updateLocalCache(res.sheets || nextSheets, res.revision);
+          window.parent.__reloadWorkoutApp({
+            ...restoreState,
+            toast: toastMsg || '저장되었습니다.'
+          });
+        }
+
+        function getActiveChipText(candidates) {
+          const btns = Array.from(document.querySelectorAll('main button'));
+          for (const b of btns) {
+            const t = (b.textContent || '').trim();
+            if (candidates.includes(t) && (b.classList.contains('on') || b.classList.contains('active') || b.getAttribute('aria-pressed') === 'true')) {
+              return t;
+            }
+          }
+          return candidates[0];
+        }
+
+        function findChipContainer(candidates) {
+          const btns = Array.from(document.querySelectorAll('main button'));
+          const matched = btns.find(b => candidates.includes((b.textContent || '').trim()));
+          return matched ? matched.parentElement : null;
+        }
+
+        function closeModal() {
+          const existing = document.getElementById('wpe-modal-backdrop');
+          if (existing) existing.remove();
+        }
+
+        function createModalShell(title) {
+          closeModal();
+          const backdrop = document.createElement('div');
+          backdrop.id = 'wpe-modal-backdrop';
+          backdrop.className = 'wpe-backdrop';
+          backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) closeModal();
+          });
+
+          const modal = document.createElement('div');
+          modal.className = 'wpe-modal';
+
+          const head = document.createElement('div');
+          head.className = 'wpe-head';
+          const h3 = document.createElement('h3');
+          h3.textContent = title;
+          const closeBtn = document.createElement('button');
+          closeBtn.type = 'button';
+          closeBtn.className = 'wpe-close';
+          closeBtn.textContent = '×';
+          closeBtn.addEventListener('click', closeModal);
+          head.append(h3, closeBtn);
+
+          const body = document.createElement('div');
+          body.className = 'wpe-body';
+
+          const foot = document.createElement('div');
+          foot.className = 'wpe-foot';
+
+          modal.append(head, body, foot);
+          backdrop.appendChild(modal);
+          document.body.appendChild(backdrop);
+
+          return { backdrop, modal, head, h3, body, foot };
+        }
+
+        // [모달 1] 운동종목 추가 · 관리
+        async function openExerciseModal() {
+          const sheets = await window.parent.__getWorkoutSheetsSnapshot();
+          const baseList = Array.isArray(sheets['운동리스트']) && sheets['운동리스트'].length
+            ? sheets['운동리스트'].map(r => [...r])
+            : [['ID', '운동구분', '운동부위', '운동종목']];
+
+          const activeRoutine = getActiveChipText(ROUTINE_NAMES);
+          const { body, foot } = createModalShell('운동종목 추가 · 관리');
+
+          let rows = baseList.slice(1).filter(r => r && r[0] != null && r[0] !== '');
+          let editingId = null;
+          let typeVal = '근력';
+          let partVal = '등';
+          let filterPart = '전체';
+          let nameVal = '';
+          let errorText = '';
+          let saving = false;
+
+          function render() {
+            body.innerHTML = '';
+            foot.innerHTML = '';
+
+            // 1) 추가/수정 폼 카드
+            const formCard = document.createElement('div');
+            formCard.className = 'wpe-card';
+
+            const formTitle = document.createElement('div');
+            formTitle.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
+            const ftText = document.createElement('strong');
+            ftText.style.fontSize = '14px';
+            ftText.textContent = editingId ? '운동종목 수정' : '새 운동종목 추가';
+            formTitle.appendChild(ftText);
+            if (editingId) {
+              const cancelEdit = document.createElement('button');
+              cancelEdit.type = 'button';
+              cancelEdit.className = 'wpe-btn sm';
+              cancelEdit.textContent = '새 추가 모드로';
+              cancelEdit.addEventListener('click', () => {
+                editingId = null;
+                typeVal = '근력';
+                partVal = '등';
+                nameVal = '';
+                errorText = '';
+                render();
+              });
+              formTitle.appendChild(cancelEdit);
+            }
+            formCard.appendChild(formTitle);
+
+            // 운동구분
+            const typeWrap = document.createElement('div');
+            const typeLbl = document.createElement('span');
+            typeLbl.className = 'wpe-label';
+            typeLbl.textContent = '운동구분';
+            const seg = document.createElement('div');
+            seg.className = 'wpe-seg';
+            ['근력', '유산소'].forEach(t => {
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = typeVal === t ? 'on' : '';
+              b.textContent = t;
+              b.addEventListener('click', () => {
+                typeVal = t;
+                if (t === '유산소') partVal = '전신';
+                else if (partVal === '전신') partVal = '등';
+                render();
+              });
+              seg.appendChild(b);
+            });
+            typeWrap.append(typeLbl, seg);
+            formCard.appendChild(typeWrap);
+
+            // 운동부위
+            const partWrap = document.createElement('div');
+            const partLbl = document.createElement('span');
+            partLbl.className = 'wpe-label';
+            partLbl.textContent = '운동부위';
+            const partChips = document.createElement('div');
+            partChips.className = 'wpe-chips';
+            BODY_PARTS.forEach(p => {
+              const c = document.createElement('button');
+              c.type = 'button';
+              c.className = 'wpe-chip' + (partVal === p ? ' on' : '');
+              c.textContent = p;
+              c.addEventListener('click', () => {
+                partVal = p;
+                render();
+              });
+              partChips.appendChild(c);
+            });
+            partWrap.append(partLbl, partChips);
+            formCard.appendChild(partWrap);
+
+            // 종목명
+            const nameWrap = document.createElement('div');
+            const nameLbl = document.createElement('span');
+            nameLbl.className = 'wpe-label';
+            nameLbl.textContent = '운동종목 이름';
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.className = 'wpe-input';
+            nameInput.placeholder = '예: 덤벨 숄더프레스, 풀업, 사이클';
+            nameInput.maxLength = 80;
+            nameInput.value = nameVal;
+            nameInput.addEventListener('input', (e) => {
+              nameVal = e.target.value;
+              errorText = '';
+            });
+            nameWrap.append(nameLbl, nameInput);
+            formCard.appendChild(nameWrap);
+
+            if (errorText) {
+              const err = document.createElement('div');
+              err.className = 'wpe-error';
+              err.textContent = errorText;
+              formCard.appendChild(err);
+            }
+
+            const submitBtn = document.createElement('button');
+            submitBtn.type = 'button';
+            submitBtn.className = 'wpe-btn primary';
+            submitBtn.disabled = saving;
+            submitBtn.textContent = saving ? '저장 중...' : (editingId ? '종목 수정 저장' : '+ 운동종목 추가');
+            submitBtn.addEventListener('click', async () => {
+              const cleanName = nameVal.trim();
+              if (!cleanName) {
+                errorText = '운동종목 이름을 입력해 주세요.';
+                render();
+                return;
+              }
+              const dup = rows.find(r => String(r[3] || '').trim() === cleanName && String(r[0]) !== String(editingId || ''));
+              if (dup) {
+                errorText = '이미 등록된 운동종목입니다.';
+                render();
+                return;
+              }
+              saving = true;
+              errorText = '';
+              render();
+              try {
+                let nextRows;
+                let nextPlanRows = sheets['운동계획'];
+                if (editingId) {
+                  const prevRow = rows.find(r => String(r[0]) === String(editingId));
+                  const oldName = prevRow ? String(prevRow[3] || '').trim() : '';
+                  nextRows = rows.map(r => String(r[0]) === String(editingId) ? [r[0], typeVal, partVal, cleanName] : r);
+                  if (oldName && Array.isArray(sheets['운동계획']) && sheets['운동계획'].length > 1) {
+                    nextPlanRows = sheets['운동계획'].map((r, i) =>
+                      i > 0 && String(r[5] || '').trim() === oldName
+                        ? [r[0], r[1], r[2], typeVal, partVal, cleanName]
+                        : r
+                    );
+                  }
+                } else {
+                  const newId = String(nextNumericId([baseList[0], ...rows], 40001));
+                  nextRows = [...rows, [newId, typeVal, partVal, cleanName]];
+                }
+                const nextSheets = {
+                  ...sheets,
+                  '운동리스트': [baseList[0], ...nextRows],
+                  ...(nextPlanRows ? { '운동계획': nextPlanRows } : {})
+                };
+                await saveUpdatedSheets(
+                  nextSheets,
+                  { tab: '운동·식단', subtab: '운동계획', chip: activeRoutine },
+                  editingId ? `'${cleanName}' 종목을 수정했습니다.` : `'${cleanName}' 종목을 추가했습니다.`
+                );
+              } catch (e) {
+                saving = false;
+                errorText = e.message || '저장 중 오류가 발생했습니다.';
+                render();
+              }
+            });
+            formCard.appendChild(submitBtn);
+            body.appendChild(formCard);
+
+            // 2) 등록된 운동종목 목록 카드
+            const listCard = document.createElement('div');
+            listCard.className = 'wpe-card';
+            const listTitle = document.createElement('strong');
+            listTitle.style.fontSize = '14px';
+            listTitle.textContent = `등록된 운동종목 (${rows.length}개)`;
+            listCard.appendChild(listTitle);
+
+            const filterWrap = document.createElement('div');
+            filterWrap.className = 'wpe-chips';
+            ['전체', ...BODY_PARTS].forEach(p => {
+              const c = document.createElement('button');
+              c.type = 'button';
+              c.className = 'wpe-chip' + (filterPart === p ? ' on' : '');
+              c.textContent = p;
+              c.addEventListener('click', () => {
+                filterPart = p;
+                render();
+              });
+              filterWrap.appendChild(c);
+            });
+            listCard.appendChild(filterWrap);
+
+            const filtered = filterPart === '전체' ? rows : rows.filter(r => r[2] === filterPart);
+            if (!filtered.length) {
+              const empty = document.createElement('div');
+              empty.className = 'wpe-empty';
+              empty.textContent = '해당 부위에 등록된 종목이 없습니다.';
+              listCard.appendChild(empty);
+            } else {
+              filtered.forEach(r => {
+                const rowEl = document.createElement('div');
+                rowEl.className = 'wpe-row';
+
+                const main = document.createElement('div');
+                main.className = 'wpe-row-main';
+                const nm = document.createElement('span');
+                nm.className = 'wpe-row-name';
+                nm.style.color = PART_COLORS[r[2]] || '#1f3327';
+                nm.textContent = String(r[3] || '');
+                const badge = document.createElement('span');
+                badge.className = 'wpe-badge';
+                badge.textContent = `${r[1] || ''} · ${r[2] || ''}`;
+                main.append(nm, badge);
+
+                const editBtn = document.createElement('button');
+                editBtn.type = 'button';
+                editBtn.className = 'wpe-btn sm';
+                editBtn.textContent = '수정';
+                editBtn.addEventListener('click', () => {
+                  editingId = String(r[0]);
+                  typeVal = String(r[1] || '근력');
+                  partVal = String(r[2] || '등');
+                  nameVal = String(r[3] || '');
+                  errorText = '';
+                  render();
+                  body.scrollTop = 0;
+                });
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'wpe-icon-btn del';
+                delBtn.title = '삭제';
+                delBtn.textContent = '×';
+                delBtn.addEventListener('click', async () => {
+                  if (!window.confirm(`'${r[3]}' 종목을 목록에서 삭제할까요?\n(기존 운동기록은 유지됩니다.)`)) return;
+                  saving = true;
+                  render();
+                  try {
+                    const nextRows = rows.filter(x => String(x[0]) !== String(r[0]));
+                    const nextSheets = {
+                      ...sheets,
+                      '운동리스트': [baseList[0], ...nextRows]
+                    };
+                    await saveUpdatedSheets(
+                      nextSheets,
+                      { tab: '운동·식단', subtab: '운동계획', chip: activeRoutine },
+                      `'${r[3]}' 종목을 삭제했습니다.`
+                    );
+                  } catch (e) {
+                    saving = false;
+                    errorText = e.message || '삭제 중 오류가 발생했습니다.';
+                    render();
+                  }
+                });
+
+                rowEl.append(main, editBtn, delBtn);
+                listCard.appendChild(rowEl);
+              });
+            }
+            body.appendChild(listCard);
+
+            const closeFooterBtn = document.createElement('button');
+            closeFooterBtn.type = 'button';
+            closeFooterBtn.className = 'wpe-btn';
+            closeFooterBtn.textContent = '닫기';
+            closeFooterBtn.addEventListener('click', closeModal);
+            foot.appendChild(closeFooterBtn);
+          }
+
+          render();
+        }
+
+        // [모달 2] 운동계획 수정 (상체 / 하체 / 보강)
+        async function openWorkoutPlanModal() {
+          const sheets = await window.parent.__getWorkoutSheetsSnapshot();
+          const planTable = Array.isArray(sheets['운동계획']) && sheets['운동계획'].length
+            ? sheets['운동계획'].map(r => [...r])
+            : [['ID', '운동종류', '순서', '운동구분', '운동부위', '운동종목']];
+          const exerciseList = (sheets['운동리스트'] || []).slice(1).filter(r => r && r[0] != null && r[0] !== '');
+
+          const activeRoutine = getActiveChipText(ROUTINE_NAMES);
+          const { body, foot } = createModalShell(`${activeRoutine} 운동계획 수정`);
+
+          const otherRows = planTable.slice(1).filter(r => r && r[0] != null && r[0] !== '' && String(r[1]) !== activeRoutine);
+          let items = planTable.slice(1)
+            .filter(r => r && r[0] != null && r[0] !== '' && String(r[1]) === activeRoutine)
+            .sort((a, b) => Number(a[2]) - Number(b[2]))
+            .map(r => ({
+              id: r[0],
+              type: String(r[3] || '근력'),
+              part: String(r[4] || '등'),
+              name: String(r[5] || '')
+            }));
+
+          let addPartFilter = '전체';
+          let selectedExKey = '';
+          let saving = false;
+          let errorText = '';
+
+          function render() {
+            body.innerHTML = '';
+            foot.innerHTML = '';
+
+            // 1) 현재 루틴 순서/삭제 카드
+            const listCard = document.createElement('div');
+            listCard.className = 'wpe-card';
+            const headRow = document.createElement('div');
+            headRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
+            const title = document.createElement('strong');
+            title.style.fontSize = '14px';
+            title.textContent = `${activeRoutine} 루틴 구성 (${items.length}종목)`;
+            headRow.appendChild(title);
+            listCard.appendChild(headRow);
+
+            if (!items.length) {
+              const empty = document.createElement('div');
+              empty.className = 'wpe-empty';
+              empty.textContent = '등록된 종목이 없습니다. 아래에서 종목을 추가해 주세요.';
+              listCard.appendChild(empty);
+            } else {
+              items.forEach((item, idx) => {
+                const row = document.createElement('div');
+                row.className = 'wpe-row';
+
+                const num = document.createElement('span');
+                num.className = 'wpe-row-num';
+                num.textContent = String(idx + 1).padStart(2, '0');
+
+                const main = document.createElement('div');
+                main.className = 'wpe-row-main';
+                const nm = document.createElement('span');
+                nm.className = 'wpe-row-name';
+                nm.style.color = PART_COLORS[item.part] || '#1f3327';
+                nm.textContent = item.name;
+                const badge = document.createElement('span');
+                badge.className = 'wpe-badge';
+                badge.textContent = item.part;
+                main.append(nm, badge);
+
+                const upBtn = document.createElement('button');
+                upBtn.type = 'button';
+                upBtn.className = 'wpe-icon-btn';
+                upBtn.textContent = '▲';
+                upBtn.disabled = idx === 0;
+                upBtn.addEventListener('click', () => {
+                  const tmp = items[idx - 1];
+                  items[idx - 1] = items[idx];
+                  items[idx] = tmp;
+                  render();
+                });
+
+                const downBtn = document.createElement('button');
+                downBtn.type = 'button';
+                downBtn.className = 'wpe-icon-btn';
+                downBtn.textContent = '▼';
+                downBtn.disabled = idx === items.length - 1;
+                downBtn.addEventListener('click', () => {
+                  const tmp = items[idx + 1];
+                  items[idx + 1] = items[idx];
+                  items[idx] = tmp;
+                  render();
+                });
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'wpe-icon-btn del';
+                delBtn.textContent = '×';
+                delBtn.addEventListener('click', () => {
+                  items.splice(idx, 1);
+                  render();
+                });
+
+                row.append(num, main, upBtn, downBtn, delBtn);
+                listCard.appendChild(row);
+              });
+            }
+            body.appendChild(listCard);
+
+            // 2) 루틴에 종목 추가 카드
+            const addCard = document.createElement('div');
+            addCard.className = 'wpe-card';
+            const addTitle = document.createElement('strong');
+            addTitle.style.fontSize = '14px';
+            addTitle.textContent = '루틴에 운동종목 추가';
+            addCard.appendChild(addTitle);
+
+            const filterWrap = document.createElement('div');
+            filterWrap.className = 'wpe-chips';
+            ['전체', ...BODY_PARTS].forEach(p => {
+              const c = document.createElement('button');
+              c.type = 'button';
+              c.className = 'wpe-chip' + (addPartFilter === p ? ' on' : '');
+              c.textContent = p;
+              c.addEventListener('click', () => {
+                addPartFilter = p;
+                selectedExKey = '';
+                render();
+              });
+              filterWrap.appendChild(c);
+            });
+            addCard.appendChild(filterWrap);
+
+            const candidates = addPartFilter === '전체'
+              ? exerciseList
+              : exerciseList.filter(r => r[2] === addPartFilter);
+
+            const selectRow = document.createElement('div');
+            selectRow.style.cssText = 'display:grid;grid-template-columns:1fr auto;gap:8px;';
+            const sel = document.createElement('select');
+            sel.className = 'wpe-select';
+            if (!candidates.length) {
+              const opt = document.createElement('option');
+              opt.value = '';
+              opt.textContent = '등록된 종목이 없습니다';
+              sel.appendChild(opt);
+            } else {
+              candidates.forEach((r, i) => {
+                const key = `${r[1]}||${r[2]}||${r[3]}`;
+                const opt = document.createElement('option');
+                opt.value = key;
+                opt.textContent = `[${r[2]}] ${r[3]}`;
+                if (selectedExKey === key || (!selectedExKey && i === 0)) {
+                  opt.selected = true;
+                  selectedExKey = key;
+                }
+                sel.appendChild(opt);
+              });
+            }
+            sel.addEventListener('change', (e) => { selectedExKey = e.target.value; });
+
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'wpe-btn primary';
+            addBtn.disabled = !candidates.length;
+            addBtn.textContent = '+ 추가';
+            addBtn.addEventListener('click', () => {
+              const val = sel.value;
+              if (!val) return;
+              const [type, part, name] = val.split('||');
+              if (items.some(it => it.name === name)) {
+                errorText = '이미 이 루틴에 등록된 종목입니다.';
+                render();
+                return;
+              }
+              items.push({ id: null, type, part, name });
+              errorText = '';
+              render();
+            });
+
+            selectRow.append(sel, addBtn);
+            addCard.appendChild(selectRow);
+
+            if (errorText) {
+              const err = document.createElement('div');
+              err.className = 'wpe-error';
+              err.textContent = errorText;
+              addCard.appendChild(err);
+            }
+            body.appendChild(addCard);
+
+            // 푸터
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'wpe-btn';
+            cancelBtn.textContent = '취소';
+            cancelBtn.addEventListener('click', closeModal);
+
+            const saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.className = 'wpe-btn primary';
+            saveBtn.disabled = saving;
+            saveBtn.textContent = saving ? '저장 중...' : '운동계획 저장';
+            saveBtn.addEventListener('click', async () => {
+              saving = true;
+              errorText = '';
+              render();
+              try {
+                let nextId = nextNumericId(planTable, 50001);
+                const rebuilt = items.map((item, i) => {
+                  const id = item.id != null && item.id !== '' ? item.id : nextId++;
+                  return [id, activeRoutine, i + 1, item.type, item.part, item.name];
+                });
+                const nextSheets = {
+                  ...sheets,
+                  '운동계획': [planTable[0], ...otherRows, ...rebuilt]
+                };
+                await saveUpdatedSheets(
+                  nextSheets,
+                  { tab: '운동·식단', subtab: '운동계획', chip: activeRoutine },
+                  `${activeRoutine} 운동계획을 저장했습니다.`
+                );
+              } catch (e) {
+                saving = false;
+                errorText = e.message || '저장 중 오류가 발생했습니다.';
+                render();
+              }
+            });
+
+            foot.append(cancelBtn, saveBtn);
+          }
+
+          render();
+        }
+
+        // [모달 3] 식단계획 수정 (린매스업 / 유지 / 감량)
+        async function openDietPlanModal() {
+          const sheets = await window.parent.__getWorkoutSheetsSnapshot();
+          const dietTable = Array.isArray(sheets['식단계획']) && sheets['식단계획'].length
+            ? sheets['식단계획'].map(r => [...r])
+            : [['ID', '구분', '식사시간', '항목', '칼로리']];
+
+          const activeDiet = getActiveChipText(DIET_NAMES);
+          const { body, foot } = createModalShell(`${activeDiet} 식단계획 수정`);
+
+          const otherRows = dietTable.slice(1).filter(r => r && r[0] != null && r[0] !== '' && String(r[1]) !== activeDiet);
+          const currentRows = dietTable.slice(1).filter(r => r && r[0] != null && r[0] !== '' && String(r[1]) === activeDiet);
+
+          const mealNames = [...MEAL_ORDER];
+          currentRows.forEach(r => {
+            const m = String(r[2] || '').trim();
+            if (m && !mealNames.includes(m)) mealNames.push(m);
+          });
+
+          const byMeal = {};
+          mealNames.forEach(m => { byMeal[m] = []; });
+          currentRows.forEach(r => {
+            const m = String(r[2] || '').trim() || mealNames[0];
+            if (!byMeal[m]) byMeal[m] = [];
+            byMeal[m].push({
+              id: r[0],
+              name: String(r[3] || ''),
+              kcal: r[4] == null || r[4] === '' ? 0 : Number(r[4])
+            });
+          });
+
+          let saving = false;
+          let errorText = '';
+
+          function calcTotals() {
+            let total = 0;
+            const mealSums = {};
+            mealNames.forEach(m => {
+              const s = (byMeal[m] || []).reduce((acc, it) => acc + (Number(it.kcal) || 0), 0);
+              mealSums[m] = s;
+              total += s;
+            });
+            return { total, mealSums };
+          }
+
+          function updateSummaryDisplays() {
+            const { total, mealSums } = calcTotals();
+            const totalEl = body.querySelector('[data-wpe-diet-total]');
+            if (totalEl) totalEl.textContent = `${total.toLocaleString()} kcal`;
+            mealNames.forEach(m => {
+              const el = body.querySelector(`[data-wpe-meal-sum="${m}"]`);
+              if (el) el.textContent = `${(mealSums[m] || 0).toLocaleString()} kcal`;
+            });
+          }
+
+          function render() {
+            body.innerHTML = '';
+            foot.innerHTML = '';
+            const { total, mealSums } = calcTotals();
+
+            const summary = document.createElement('div');
+            summary.className = 'wpe-diet-summary';
+            const sLabel = document.createElement('span');
+            sLabel.style.cssText = 'font-size:13px;font-weight:700;color:#3d5747;';
+            sLabel.textContent = `${activeDiet} 하루 계획 열량`;
+            const sVal = document.createElement('strong');
+            sVal.setAttribute('data-wpe-diet-total', '1');
+            sVal.textContent = `${total.toLocaleString()} kcal`;
+            summary.append(sLabel, sVal);
+            body.appendChild(summary);
+
+            mealNames.forEach((meal, mIdx) => {
+              const card = document.createElement('div');
+              card.className = 'wpe-card';
+
+              const mHead = document.createElement('div');
+              mHead.className = 'wpe-meal-head';
+              const mTitle = document.createElement('span');
+              mTitle.className = 'wpe-meal-title';
+              mTitle.textContent = `${String(mIdx + 1).padStart(2, '0')} ${meal}`;
+              const mKcal = document.createElement('span');
+              mKcal.className = 'wpe-meal-kcal';
+              mKcal.setAttribute('data-wpe-meal-sum', meal);
+              mKcal.textContent = `${(mealSums[meal] || 0).toLocaleString()} kcal`;
+              mHead.append(mTitle, mKcal);
+              card.appendChild(mHead);
+
+              const list = byMeal[meal] || [];
+              if (!list.length) {
+                const empty = document.createElement('div');
+                empty.className = 'wpe-empty';
+                empty.textContent = '등록된 항목이 없습니다.';
+                card.appendChild(empty);
+              } else {
+                list.forEach((it, idx) => {
+                  const row = document.createElement('div');
+                  row.className = 'wpe-diet-item';
+
+                  const nameIn = document.createElement('input');
+                  nameIn.type = 'text';
+                  nameIn.className = 'wpe-input';
+                  nameIn.placeholder = '음식/항목명';
+                  nameIn.value = it.name;
+                  nameIn.addEventListener('input', (e) => { it.name = e.target.value; });
+
+                  const kcalIn = document.createElement('input');
+                  kcalIn.type = 'number';
+                  kcalIn.min = '0';
+                  kcalIn.step = '1';
+                  kcalIn.inputMode = 'numeric';
+                  kcalIn.className = 'wpe-input';
+                  kcalIn.placeholder = 'kcal';
+                  kcalIn.value = it.kcal === 0 ? '0' : String(it.kcal || '');
+                  kcalIn.addEventListener('input', (e) => {
+                    it.kcal = Math.max(0, Number(e.target.value) || 0);
+                    updateSummaryDisplays();
+                  });
+
+                  const delBtn = document.createElement('button');
+                  delBtn.type = 'button';
+                  delBtn.className = 'wpe-icon-btn del';
+                  delBtn.textContent = '×';
+                  delBtn.addEventListener('click', () => {
+                    list.splice(idx, 1);
+                    render();
+                  });
+
+                  row.append(nameIn, kcalIn, delBtn);
+                  card.appendChild(row);
+                });
+              }
+
+              const addBtn = document.createElement('button');
+              addBtn.type = 'button';
+              addBtn.className = 'wpe-btn sm';
+              addBtn.style.alignSelf = 'flex-start';
+              addBtn.textContent = `+ ${meal} 항목 추가`;
+              addBtn.addEventListener('click', () => {
+                list.push({ id: null, name: '', kcal: 0 });
+                render();
+              });
+              card.appendChild(addBtn);
+              body.appendChild(card);
+            });
+
+            if (errorText) {
+              const err = document.createElement('div');
+              err.className = 'wpe-error';
+              err.textContent = errorText;
+              body.appendChild(err);
+            }
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'wpe-btn';
+            cancelBtn.textContent = '취소';
+            cancelBtn.addEventListener('click', closeModal);
+
+            const saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.className = 'wpe-btn primary';
+            saveBtn.disabled = saving;
+            saveBtn.textContent = saving ? '저장 중...' : '식단계획 저장';
+            saveBtn.addEventListener('click', async () => {
+              saving = true;
+              errorText = '';
+              render();
+              try {
+                let nextId = nextNumericId(dietTable, 20001);
+                const rebuilt = [];
+                mealNames.forEach(meal => {
+                  (byMeal[meal] || []).forEach(it => {
+                    const nm = String(it.name || '').trim();
+                    if (!nm) return;
+                    const id = it.id != null && it.id !== '' ? it.id : nextId++;
+                    rebuilt.push([id, activeDiet, meal, nm, Math.max(0, Number(it.kcal) || 0)]);
+                  });
+                });
+                const nextSheets = {
+                  ...sheets,
+                  '식단계획': [dietTable[0], ...otherRows, ...rebuilt]
+                };
+                await saveUpdatedSheets(
+                  nextSheets,
+                  { tab: '운동·식단', subtab: '식단계획', chip: activeDiet },
+                  `${activeDiet} 식단계획을 저장했습니다.`
+                );
+              } catch (e) {
+                saving = false;
+                errorText = e.message || '저장 중 오류가 발생했습니다.';
+                render();
+              }
+            });
+
+            foot.append(cancelBtn, saveBtn);
+          }
+
+          render();
+        }
+
+        // DOM 상태에 맞춰 버튼 자동 배치/숨김 동기화
+        function syncPlanTabUI() {
+          injectStyles();
+          const seg = document.querySelector('.segmented[aria-label="운동·식단 선택"]');
+          const customAddBtn = document.querySelector('button[data-wpe-add-exercise]');
+          const customEditBtn = document.querySelector('button[data-wpe-plan-edit]');
+
+          if (!seg) {
+            // 다른 탭에서는 원래 버튼 복원 및 커스텀 버튼 제거
+            if (customAddBtn) customAddBtn.remove();
+            if (customEditBtn) customEditBtn.remove();
+            document.querySelectorAll('button[data-wpe-hidden-orig]').forEach(btn => {
+              btn.style.display = '';
+              btn.removeAttribute('data-wpe-hidden-orig');
+            });
+            return;
+          }
+
+          const activeSegBtn = Array.from(seg.querySelectorAll('button')).find(b => b.classList.contains('on'));
+          const subtab = activeSegBtn ? activeSegBtn.textContent.trim() : '운동계획';
+          const isWorkoutPlan = subtab === '운동계획';
+
+          // 1) 상단 '+ 운동 기록' 버튼 숨기고, 운동계획일 때만 '+ 운동종목 추가' 표시
+          const heading = seg.closest('.page-heading') || seg.parentElement;
+          if (heading) {
+            const origPrimary = Array.from(heading.querySelectorAll('button.primary'))
+              .find(b => !b.hasAttribute('data-wpe-add-exercise'));
+            if (origPrimary && origPrimary.style.display !== 'none') {
+              origPrimary.style.display = 'none';
+              origPrimary.setAttribute('data-wpe-hidden-orig', '1');
+            }
+
+            if (isWorkoutPlan) {
+              if (!customAddBtn) {
+                const addBtn = document.createElement('button');
+                addBtn.type = 'button';
+                addBtn.className = 'primary';
+                addBtn.setAttribute('data-wpe-add-exercise', '1');
+                addBtn.textContent = '+ 운동종목 추가';
+                addBtn.addEventListener('click', openExerciseModal);
+                heading.appendChild(addBtn);
+              } else {
+                if (customAddBtn.style.display === 'none') customAddBtn.style.display = '';
+                if (heading.lastElementChild !== customAddBtn) heading.appendChild(customAddBtn);
+              }
+            } else if (customAddBtn) {
+              customAddBtn.style.display = 'none';
+            }
+          }
+
+          // 2) 칩 행 오른쪽에 '계획 수정' 버튼 배치 (운동계획 / 식단계획 각각 연결)
+          const chipContainer = findChipContainer(isWorkoutPlan ? ROUTINE_NAMES : DIET_NAMES);
+          if (chipContainer) {
+            chipContainer.style.display = 'flex';
+            chipContainer.style.alignItems = 'center';
+            chipContainer.style.flexWrap = 'wrap';
+            chipContainer.style.width = '100%';
+
+            let editBtn = chipContainer.querySelector('button[data-wpe-plan-edit]');
+            if (!editBtn) {
+              if (customEditBtn) customEditBtn.remove();
+              editBtn = document.createElement('button');
+              editBtn.type = 'button';
+              editBtn.className = 'wpe-edit-chip-btn';
+              editBtn.setAttribute('data-wpe-plan-edit', '1');
+              editBtn.textContent = '✎ 계획 수정';
+              editBtn.addEventListener('click', () => {
+                const curSeg = document.querySelector('.segmented[aria-label="운동·식단 선택"] button.on');
+                const curMode = curSeg ? curSeg.textContent.trim() : '운동계획';
+                if (curMode === '식단계획') openDietPlanModal();
+                else openWorkoutPlanModal();
+              });
+              chipContainer.appendChild(editBtn);
+            } else if (chipContainer.lastElementChild !== editBtn) {
+              chipContainer.appendChild(editBtn);
+            }
+          }
+        }
+
+        // 저장 후 소프트 리로드 시 이전 탭·서브탭·칩 자동 복원
+        function waitForEl(finder, onFound, maxTries = 40, intervalMs = 30) {
+          let tries = 0;
+          const t = setInterval(() => {
+            tries++;
+            const el = finder();
+            if (el) {
+              clearInterval(t);
+              onFound(el);
+            } else if (tries >= maxTries) {
+              clearInterval(t);
+            }
+          }, intervalMs);
+        }
+
+        function applyPendingRestore() {
+          const restore = window.parent.__pendingWorkoutRestore;
+          if (!restore) return;
+          window.parent.__pendingWorkoutRestore = null;
+
+          waitForEl(
+            () => Array.from(document.querySelectorAll('nav button, aside button')).find(b => (b.textContent || '').trim() === restore.tab),
+            (planTabBtn) => {
+              planTabBtn.click();
+              waitForEl(
+                () => Array.from(document.querySelectorAll('.segmented[aria-label="운동·식단 선택"] button')).find(b => (b.textContent || '').trim() === restore.subtab),
+                (targetSub) => {
+                  targetSub.click();
+                  waitForEl(
+                    () => Array.from(document.querySelectorAll('main button')).find(b => (b.textContent || '').trim() === restore.chip),
+                    (targetChip) => {
+                      targetChip.click();
+                      syncPlanTabUI();
+                      if (restore.toast) showToast(restore.toast);
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+
+        let scheduled = false;
+        function scheduleSync() {
+          if (scheduled) return;
+          scheduled = true;
+          requestAnimationFrame(() => {
+            scheduled = false;
+            syncPlanTabUI();
+          });
+        }
+
+        function startObserver() {
+          syncPlanTabUI();
+          applyPendingRestore();
+          const obs = new MutationObserver(scheduleSync);
+          obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+        }
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', startObserver);
+        } else {
+          startObserver();
+        }
+      }
+
       function injectBridgeIntoAppHtml(rawHtml) {
         const closeTag = '<' + '/script>';
         const shim =
           '<script>\n' +
           '(() => {\n' +
           '  const USER_ID = "recoverist02";\n' +
+          '  const getTableWidth = (name) => (window.parent.__workoutTableWidths && window.parent.__workoutTableWidths[name]) || (name === "운동기록" ? 16 : 9);\n' +
           '  // 브라우저 localStorage에 남아있는 이전 객체형 캐시를 정상 배열로 즉시 복원\n' +
           '  try {\n' +
           '    const ck = "workout-cache-v1:" + USER_ID;\n' +
@@ -504,7 +1825,7 @@
           '    if (rawPending && window.parent.__normalizeWorkoutRow) {\n' +
           '      const p = JSON.parse(rawPending);\n' +
           '      if (p && p.row) {\n' +
-          '        p.row = window.parent.__normalizeWorkoutRow(p.row, p.key === "운동기록" ? 16 : 9);\n' +
+          '        p.row = window.parent.__normalizeWorkoutRow(p.row, getTableWidth(p.key));\n' +
           '        localStorage.setItem(pk, JSON.stringify(p));\n' +
           '      }\n' +
           '    }\n' +
@@ -516,11 +1837,11 @@
           '      data.sheets = window.parent.__normalizeWorkoutSheets(data.sheets);\n' +
           '    }\n' +
           '    if (data && data.row && window.parent.__normalizeWorkoutRow) {\n' +
-          '      data.row = window.parent.__normalizeWorkoutRow(data.row, data.table === "운동기록" ? 16 : 9);\n' +
+          '      data.row = window.parent.__normalizeWorkoutRow(data.row, getTableWidth(data.table));\n' +
           '    }\n' +
           '    return {\n' +
           '      ok: status >= 200 && status < 300,\n' +
-          '      status: status,\n' +
+          '      status,\n' +
           '      headers: {\n' +
           '        get(k) {\n' +
           '          const n = String(k || "").toLowerCase();\n' +
@@ -570,6 +1891,8 @@
           '})();\n' +
           closeTag;
 
+        const enhancer = '<script>(' + __workoutPlanEnhancerBootstrap.toString() + ')();' + closeTag;
+
         const swRe = new RegExp('<script>\\(\\(\\)=>\\{[\\s\\S]*?serviceWorker[\\s\\S]*?<' + '/script>', 'gi');
         const cfRe = new RegExp('<script>\\(function\\(\\)\\{function c\\(\\)[\\s\\S]*?<' + '/script>', 'gi');
 
@@ -581,15 +1904,17 @@
           .replaceAll('구글 시트에 저장했어', '클라우드에 저장했어 (시트 자동 백업)')
           .replaceAll('구글 시트 연결됨', '클라우드 연결됨 · 시트 자동 백업');
 
+        const injectedHead = shim + enhancer;
         if (/<head[^>]*>/i.test(cleaned)) {
-          return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
+          return cleaned.replace(/<head[^>]*>/i, (m) => m + injectedHead);
         }
-        return shim + cleaned;
+        return injectedHead + cleaned;
       }
 
       async function boot() {
         const text = await prefetchShellPromise;
         if (text && (text.includes('workout-generic-shell-v1') || text.includes('운동기록01'))) {
+          cachedShellHtml = text;
           await prefetchMainPromise;
           appFrame.onload = () => bootOverlay.classList.add('hidden');
           appFrame.srcdoc = injectBridgeIntoAppHtml(text);
